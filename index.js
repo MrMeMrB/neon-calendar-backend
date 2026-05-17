@@ -1,8 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import pkg from 'pg';
-import pdfParse from 'pdf-parse';
-import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 import ical from 'node-ical';
 
@@ -19,11 +17,9 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
 let memoryCache = { liam: [], zoe: [], work: [], family: [] };
 
-// Whole-word matching list
+// Softer keyword set to catch potential matches
 const KIDS_KEYWORDS = [
   'jasper', 'indie', 'jb', 'ib school', 'phonics', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 
   'parents', 'term', 'half term', 'summer holiday', 'holiday', 'haven', 'centre'
@@ -58,16 +54,17 @@ const initDb = async () => {
     );
   `);
 
-  // NEW TABLE: Stores unique IDs of manually filtered-out iCal entries
+  // Unified learning table tracking manual validation states
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS blocked_events (
+    CREATE TABLE IF NOT EXISTS event_learning_states (
       id SERIAL PRIMARY KEY,
       event_id VARCHAR(255) UNIQUE NOT NULL,
-      blocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      status VARCHAR(50) NOT NULL, -- 'verified_kid', 'blocked'
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
 
-  console.log("PostgreSQL Unified Schema + Learning Filters initialized.");
+  console.log("PostgreSQL Learning Engine Schema Initialized.");
 };
 initDb().catch(console.error);
 
@@ -79,64 +76,70 @@ const fetchExternalCalendar = async (url, defaultColor, applyZoeKidsFilter = fal
     const startWindow = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const endWindow = new Date(now.getFullYear(), now.getMonth() + 2, 0);
 
-    // Fetch currently blocked IDs from the DB to skip them immediately
-    const blockedResult = await pool.query('SELECT event_id FROM blocked_events');
-    const blockedIds = new Set(blockedResult.rows.map(r => r.event_id));
+    // Pull learning records
+    const stateResult = await pool.query('SELECT event_id, status FROM event_learning_states');
+    const stateMap = new Map(stateResult.rows.map(r => [r.event_id, r.status]));
 
     return Object.values(data)
       .filter(event => {
         if (event.type !== 'VEVENT' || !event.start) return false;
-        if (blockedIds.has(event.uid)) return false; // Skip if user hidden it previously
-        
-        const eventStart = new Date(event.start);
-        const insideWindow = eventStart >= startWindow && eventStart <= endWindow;
-        if (!insideWindow) return false;
+        if (stateMap.get(event.uid) === 'blocked') return false; // Hard hide if blocked
 
-        if (applyZoeKidsFilter) {
-          const textPayload = `${event.summary || ''} ${event.description || ''}`.toLowerCase();
-          
-          // Enhanced strict boundary matching (prevents "CJB" matching "JB")
-          return KIDS_KEYWORDS.some(keyword => {
-            const regex = new RegExp(`\\b${keyword}\\b`, 'i');
-            return regex.test(textPayload);
-          });
+        const eventStart = new Date(event.start);
+        return eventStart >= startWindow && eventStart <= endWindow;
+      })
+      .filter(event => {
+        // If not Zoe's stream, let everything pass
+        if (!applyZoeKidsFilter) return true;
+
+        // If explicitly approved before, let it pass
+        if (stateMap.get(event.uid) === 'verified_kid') return true;
+
+        // Run soft keyword matching
+        const textPayload = `${event.summary || ''} ${event.description || ''}`.toLowerCase();
+        return KIDS_KEYWORDS.some(keyword => textPayload.includes(keyword));
+      })
+      .map(event => {
+        const status = stateMap.get(event.uid) || 'unverified';
+        let title = event.summary;
+        let color = defaultColor;
+        let isUnverified = false;
+
+        if (applyZoeKidsFilter && status === 'unverified') {
+          title = `❓ ${title}`;
+          color = '#4b5563'; // Muted dark slate gray for unverified items
+          isUnverified = true;
         }
 
-        return true;
-      })
-      .map(event => ({
-        id: event.uid,
-        title: event.summary,
-        start: event.start,
-        end: event.end,
-        description: event.description || '',
-        color: defaultColor
-      }));
+        return {
+          id: event.uid,
+          title: title,
+          start: event.start,
+          end: event.end,
+          description: event.description || '',
+          color: color,
+          isUnverified: isUnverified
+        };
+      });
   } catch (err) {
-    console.error(`Error parsing link stream: ${url.substring(0, 30)}...`, err.message);
+    console.error("iCal Parse error stream:", err.message);
     return [];
   }
 };
 
 const updateAllCalendarsCache = async () => {
-  console.log("⚡ Starting background sync of external calendar streams...");
   try {
     if (process.env.ICAL_URL_LIAM) memoryCache.liam = await fetchExternalCalendar(process.env.ICAL_URL_LIAM, '#10b981');
     if (process.env.ICAL_URL_ZOE) memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, '#f43f5e', true);
     if (process.env.ICAL_URL_WORK) memoryCache.work = await fetchExternalCalendar(process.env.ICAL_URL_WORK, '#818cf8');
     if (process.env.ICAL_URL_FAMILY) memoryCache.family = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, '#f59e0b');
-    console.log("✅ Background sync complete.");
-  } catch (err) {
-    console.error("Background sync failed:", err.message);
-  }
+  } catch (err) { console.error(err); }
 };
 
 updateAllCalendarsCache();
 setInterval(updateAllCalendarsCache, 5 * 60 * 1000);
 
-// ==========================================
 // ENDPOINTS
-// ==========================================
 app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
@@ -158,10 +161,8 @@ app.get('/api/events', async (req, res) => {
     }));
 
     let finalPayload = [...localEvents];
-
-    if (targetView === 'combined') {
-      finalPayload = [...finalPayload, ...memoryCache.liam, ...memoryCache.zoe, ...memoryCache.work, ...memoryCache.family];
-    } else if (targetView === 'liam') finalPayload = [...finalPayload, ...memoryCache.liam];
+    if (targetView === 'combined') finalPayload = [...finalPayload, ...memoryCache.liam, ...memoryCache.zoe, ...memoryCache.work, ...memoryCache.family];
+    else if (targetView === 'liam') finalPayload = [...finalPayload, ...memoryCache.liam];
     else if (targetView === 'zoe') finalPayload = [...finalPayload, ...memoryCache.zoe];
     else if (targetView === 'work') finalPayload = [...finalPayload, ...memoryCache.work];
     else if (targetView === 'family') finalPayload = [...finalPayload, ...memoryCache.family];
@@ -170,13 +171,15 @@ app.get('/api/events', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// NEW PIPELINE: Add event to blocklist and force a stream filter cache refresh
-app.post('/api/events/block', async (req, res) => {
-  const { eventId } = req.body;
-  if (!eventId) return res.status(400).json({ error: "Missing Target Event ID" });
+// Update the learning status of an external stream item
+app.post('/api/events/learn', async (req, res) => {
+  const { eventId, status } = req.body; // status can be 'verified_kid' or 'blocked'
   try {
-    await pool.query('INSERT INTO blocked_events (event_id) VALUES ($1) ON CONFLICT DO NOTHING', [eventId]);
-    await updateAllCalendarsCache(); // Recalculate working sets
+    await pool.query(
+      'INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status',
+      [eventId, status]
+    );
+    await updateAllCalendarsCache();
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -184,10 +187,7 @@ app.post('/api/events/block', async (req, res) => {
 app.post('/api/events', async (req, res) => {
   const { title, start, end, description, calendar } = req.body;
   try {
-    const result = await pool.query(
-      'INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [title, start, end || null, description || '', calendar || 'combined']
-    );
+    const result = await pool.query('INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5) RETURNING *', [title, start, end || null, description || '', calendar || 'combined']);
     res.json({ success: true, event: result.rows[0] });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -202,10 +202,7 @@ app.get('/api/events/:id/notes', async (req, res) => {
 app.post('/api/events/:id/notes', async (req, res) => {
   const { notes } = req.body;
   try {
-    await pool.query(
-      `INSERT INTO event_notes (event_id, custom_notes) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET custom_notes = EXCLUDED.custom_notes`,
-      [req.params.id, notes]
-    );
+    await pool.query('INSERT INTO event_notes (event_id, custom_notes) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET custom_notes = EXCLUDED.custom_notes', [req.params.id, notes]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -213,17 +210,16 @@ app.post('/api/events/:id/notes', async (req, res) => {
 app.get('/api/general-notes', async (req, res) => {
   try {
     const result = await pool.query('SELECT content FROM general_notes ORDER BY id DESC LIMIT 1');
-    res.json({ content: result.rows[0]?.content || "" });
+    res.json({ content: r.rows[0]?.content || "" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/general-notes', async (req, res) => {
-  const { content } = req.body;
   try {
-    await pool.query('INSERT INTO general_notes (content) VALUES ($1)', [content]);
+    await pool.query('INSERT INTO general_notes (content) VALUES ($1)', [req.body.content]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => console.log(`Backend server listening on port ${PORT}`));
+app.listen(PORT, () => console.log(`Backend engine running on port ${PORT}`));
