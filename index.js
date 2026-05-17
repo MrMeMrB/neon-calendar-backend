@@ -29,7 +29,15 @@ let memoryCache = {
   family: []
 };
 
+// Case-insensitive keywords for filtering Zoe's stream
+const KIDS_KEYWORDS = [
+  'jasper', 'indie', 'jb', 'ib school', 'phonics', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 
+  'parents', 'term', 'half term', 'summer holiday', 'holiday', 'haven', 'centre'
+];
+
+// Automatically initializes and upgrades database tables on server start
 const initDb = async () => {
+  // Core events table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS events (
       id SERIAL PRIMARY KEY,
@@ -40,7 +48,27 @@ const initDb = async () => {
       calendar VARCHAR(50) DEFAULT 'combined'
     );
   `);
-  console.log("Neon PostgreSQL tables initialized successfully.");
+
+  // Table to store user notes specifically pinned to a calendar event
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS event_notes (
+      id SERIAL PRIMARY KEY,
+      event_id VARCHAR(255) UNIQUE NOT NULL,
+      custom_notes TEXT NOT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  // Table to store the persistent global sidebar scratchpad content
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS general_notes (
+      id SERIAL PRIMARY KEY,
+      content TEXT NOT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  console.log("PostgreSQL Unified Schema initialized successfully.");
 };
 initDb().catch(console.error);
 
@@ -70,14 +98,13 @@ async function extractEventsWithAI(text) {
 }
 
 // ==========================================================
-// TIME WINDOW FILTER & ICAL FETCH ENGINE
+// TIME WINDOW FILTER & ICAL FETCH ENGINE (WITH ZOE KEYWORDS)
 // ==========================================================
-const fetchExternalCalendar = async (url, defaultColor) => {
+const fetchExternalCalendar = async (url, defaultColor, applyZoeKidsFilter = false) => {
   if (!url) return [];
   try {
     const data = await ical.async.fromURL(url);
     
-    // Define our 3-month sliding window boundaries
     const now = new Date();
     const startWindow = new Date(now.getFullYear(), now.getMonth() - 1, 1); // Start of last month
     const endWindow = new Date(now.getFullYear(), now.getMonth() + 2, 0);  // End of next month
@@ -85,9 +112,19 @@ const fetchExternalCalendar = async (url, defaultColor) => {
     return Object.values(data)
       .filter(event => {
         if (event.type !== 'VEVENT' || !event.start) return false;
+        
+        // Window check
         const eventStart = new Date(event.start);
-        // Only keep the event if it fits inside our 3-month window
-        return eventStart >= startWindow && eventStart <= endWindow;
+        const insideWindow = eventStart >= startWindow && eventStart <= endWindow;
+        if (!insideWindow) return false;
+
+        // If it's Zoe's stream, check text context against your requested keywords
+        if (applyZoeKidsFilter) {
+          const textPayload = `${event.summary || ''} ${event.description || ''}`.toLowerCase();
+          return KIDS_KEYWORDS.some(keyword => textPayload.includes(keyword));
+        }
+
+        return true;
       })
       .map(event => ({
         id: event.uid,
@@ -103,13 +140,17 @@ const fetchExternalCalendar = async (url, defaultColor) => {
   }
 };
 
-// Background Worker: Refreshes cache completely out-of-band every 5 minutes
 const updateAllCalendarsCache = async () => {
   console.log("⚡ Starting background sync of external calendar streams...");
   try {
     if (process.env.ICAL_URL_LIAM) memoryCache.liam = await fetchExternalCalendar(process.env.ICAL_URL_LIAM, '#10b981');
-    if (process.env.ICAL_URL_ZOE) memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, '#f43f5e');
+    
+    // Zoe's stream with critical keyword filtering enabled
+    if (process.env.ICAL_URL_ZOE) memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, '#f43f5e', true);
+    
+    // Liam's ATI Work stream (Outlook stream link configuration)
     if (process.env.ICAL_URL_WORK) memoryCache.work = await fetchExternalCalendar(process.env.ICAL_URL_WORK, '#818cf8');
+    
     if (process.env.ICAL_URL_FAMILY) memoryCache.family = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, '#f59e0b');
     console.log("✅ Background sync complete. Cache warmed.");
   } catch (err) {
@@ -117,18 +158,16 @@ const updateAllCalendarsCache = async () => {
   }
 };
 
-// Run sync immediately on startup, then every 5 minutes
 updateAllCalendarsCache();
 setInterval(updateAllCalendarsCache, 5 * 60 * 1000);
 
 // ==========================================
-// MULTI-CALENDAR ROUTE (NOW INSTANT)
+// EVENTS DELIVER PIPELINE
 // ==========================================
 app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
 
   try {
-    // 1. Query Neon Database Events
     let dbResult;
     if (targetView === 'combined') {
       dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
@@ -137,15 +176,15 @@ app.get('/api/events', async (req, res) => {
     }
 
     const localEvents = dbResult.rows.map(row => ({
-      id: row.id,
+      id: String(row.id),
       title: row.title,
       start: row.start_time,
       end: row.end_time,
       description: row.description,
-      color: row.calendar === 'zoe' ? '#f43f5e' : row.calendar === 'work' ? '#818cf8' : row.calendar === 'family' ? '#f59e0b' : '#38bdf8'
+      calendar: row.calendar,
+      color: row.calendar === 'zoe' ? '#f43f5e' : row.calendar === 'work' ? '#818cf8' : row.calendar === 'family' ? '#f59e0b' : row.calendar === 'kids-logs' ? '#ec4899' : '#38bdf8'
     }));
 
-    // 2. Build Response Payload straight from the instant memory cache
     let finalPayload = [...localEvents];
 
     if (targetView === 'combined') {
@@ -167,14 +206,12 @@ app.get('/api/events', async (req, res) => {
     }
 
     res.json(finalPayload);
-
   } catch (err) {
-    console.error("Pipeline failure:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Post routes and listener remain exactly the same...
+// Create/Commit Manual Events
 app.post('/api/events', async (req, res) => {
   const { title, start, end, description, calendar } = req.body;
   try {
@@ -188,6 +225,55 @@ app.post('/api/events', async (req, res) => {
   }
 });
 
+// ==========================================
+// NEW FEATURES: EVENT DETAILED NOTES ENDPOINTS
+// ==========================================
+app.get('/api/events/:id/notes', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT custom_notes FROM event_notes WHERE event_id = $1', [req.params.id]);
+    res.json({ notes: result.rows[0]?.custom_notes || "" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/events/:id/notes', async (req, res) => {
+  const { notes } = req.body;
+  try {
+    await pool.query(
+      `INSERT INTO event_notes (event_id, custom_notes) VALUES ($1, $2)
+       ON CONFLICT (event_id) DO UPDATE SET custom_notes = EXCLUDED.custom_notes`,
+      [req.params.id, notes]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==========================================
+// NEW FEATURES: GLOBAL SCRATCHPAD ENDPOINTS
+// ==========================================
+app.get('/api/general-notes', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT content FROM general_notes ORDER BY id DESC LIMIT 1');
+    res.json({ content: result.rows[0]?.content || "" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/general-notes', async (req, res) => {
+  const { content } = req.body;
+  try {
+    await pool.query('INSERT INTO general_notes (content) VALUES ($1)', [content]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Document parsing utilities
 app.post('/api/upload-document', express.raw({ type: 'application/pdf', limit: '10mb' }), async (req, res) => {
   try {
     const parsedPdf = await pdfParse(req.body);
