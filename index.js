@@ -4,6 +4,7 @@ import pkg from 'pg';
 import pdfParse from 'pdf-parse';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
+import ical from 'node-ical'; // <-- Make sure this import is here
 
 dotenv.config();
 
@@ -21,13 +22,15 @@ const pool = new Pool({
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const initDb = async () => {
+  // Added a 'calendar' column to track where AI-uploaded events go
   await pool.query(`
     CREATE TABLE IF NOT EXISTS events (
       id SERIAL PRIMARY KEY,
       title VARCHAR(255) NOT NULL,
       start_time TIMESTAMP NOT NULL,
       end_time TIMESTAMP,
-      description TEXT
+      description TEXT,
+      calendar VARCHAR(50) DEFAULT 'combined'
     );
   `);
   console.log("Neon PostgreSQL tables initialized successfully.");
@@ -59,28 +62,89 @@ async function extractEventsWithAI(text) {
   return JSON.parse(response.text);
 }
 
+// ==========================================
+// UPGRADED MULTI-CALENDAR SYNC ROUTE
+// ==========================================
 app.get('/api/events', async (req, res) => {
+  const { calendar } = req.query; // Captures the channel (e.g. ?calendar=zoe)
+  let eventsList = [];
+
   try {
-    const result = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
-    const formatted = result.rows.map(row => ({
+    // 1. Fetch Local Database Events from Neon
+    let dbResult;
+    if (!calendar || calendar === 'combined') {
+      dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
+    } else {
+      dbResult = await pool.query('SELECT * FROM events WHERE calendar = $1 ORDER BY start_time ASC', [calendar]);
+    }
+
+    const localEvents = dbResult.rows.map(row => ({
       id: row.id,
       title: row.title,
       start: row.start_time,
       end: row.end_time,
-      description: row.description
+      description: row.description,
+      // Default color if it doesn't match an external stream
+      color: row.calendar === 'zoe' ? '#f43f5e' : row.calendar === 'work' ? '#818cf8' : row.calendar === 'family' ? '#f59e0b' : '#38bdf8'
     }));
-    res.json(formatted);
+
+    eventsList = [...localEvents];
+
+    // Helper to stream, parse, and clean external iCal URLs
+    const fetchExternalCalendar = async (url, defaultColor) => {
+      if (!url) return [];
+      try {
+        const data = await ical.async.fromURL(url);
+        return Object.values(data)
+          .filter(event => event.type === 'VEVENT')
+          .map(event => ({
+            id: event.uid,
+            title: event.summary,
+            start: event.start,
+            end: event.end,
+            description: event.description || '',
+            color: defaultColor // Assign color palette matching your frontend theme
+          }));
+      } catch (err) {
+        console.error(`Error parsing link stream: ${url.substring(0, 30)}...`, err.message);
+        return [];
+      }
+    };
+
+    // 2. Mix in Live Feeds Depending on Active Frontend View Matrix
+    if (!calendar || calendar === 'liam' || calendar === 'combined') {
+      const gcalLiam = await fetchExternalCalendar(process.env.ICAL_URL_LIAM, '#10b981'); // Emerald Green
+      eventsList = [...eventsList, ...gcalLiam];
+    }
+    
+    if (!calendar || calendar === 'zoe' || calendar === 'combined') {
+      const gcalZoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, '#f43f5e'); // Rose Pink
+      eventsList = [...eventsList, ...gcalZoe];
+    }
+    
+    if (!calendar || calendar === 'work' || calendar === 'combined') {
+      const outlookWork = await fetchExternalCalendar(process.env.ICAL_URL_WORK, '#818cf8'); // Indigo Blue
+      eventsList = [...eventsList, ...outlookWork];
+    }
+    
+    if (!calendar || calendar === 'family' || calendar === 'combined') {
+      const appleFamily = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, '#f59e0b'); // Amber Orange
+      eventsList = [...eventsList, ...appleFamily];
+    }
+
+    res.json(eventsList);
+
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 app.post('/api/events', async (req, res) => {
-  const { title, start, end, description } = req.body;
+  const { title, start, end, description, calendar } = req.body;
   try {
     const result = await pool.query(
-      'INSERT INTO events (title, start_time, end_time, description) VALUES ($1, $2, $3, $4) RETURNING *',
-      [title, start, end || null, description || '']
+      'INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [title, start, end || null, description || '', calendar || 'combined']
     );
     res.json({ success: true, event: result.rows[0] });
   } catch (err) {
