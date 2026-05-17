@@ -62,7 +62,7 @@ const initDb = async () => {
     );
   `);
 
-  console.log("PostgreSQL Learning Engine Schema Initialized.");
+  console.log("PostgreSQL Target Routing Engine Schema Initialized.");
 };
 initDb().catch(console.error);
 
@@ -98,7 +98,6 @@ const fetchExternalCalendar = async (url, defaultColor, applyZoeKidsFilter = fal
         let color = defaultColor; 
         let isUnverified = false;
 
-        // If it hasn't been approved yet, fade it down and give it a ? mark
         if (applyZoeKidsFilter && status === 'unverified') {
           title = `❓ ${title}`;
           color = '#4b5563'; 
@@ -112,7 +111,8 @@ const fetchExternalCalendar = async (url, defaultColor, applyZoeKidsFilter = fal
           end: event.end,
           description: event.description || '',
           color: color,
-          isUnverified: isUnverified
+          isUnverified: isUnverified,
+          isExternal: true // Flag to know if it originates from an live feed
         };
       });
   } catch (err) {
@@ -133,6 +133,7 @@ const updateAllCalendarsCache = async () => {
 updateAllCalendarsCache();
 setInterval(updateAllCalendarsCache, 5 * 60 * 1000);
 
+// STRICT CATEGORY VIEWS FILTERING
 app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
@@ -150,17 +151,52 @@ app.get('/api/events', async (req, res) => {
       end: row.end_time,
       description: row.description,
       calendar: row.calendar,
-      color: row.calendar === 'zoe' ? '#f43f5e' : row.calendar === 'work' ? '#818cf8' : row.calendar === 'family' ? '#f59e0b' : row.calendar === 'kids-logs' ? '#ec4899' : '#38bdf8'
+      isExternal: false,
+      color: row.calendar === 'zoe' ? '#f43f5e' : row.calendar === 'work' ? '#818cf8' : row.calendar === 'family' ? '#f59e0b' : row.calendar === 'kids-logs' ? '#ec4899' : '#10b981'
     }));
 
     let finalPayload = [...localEvents];
-    if (targetView === 'combined') finalPayload = [...finalPayload, ...memoryCache.liam, ...memoryCache.zoe, ...memoryCache.work, ...memoryCache.family];
-    else if (targetView === 'liam') finalPayload = [...finalPayload, ...memoryCache.liam];
-    else if (targetView === 'zoe') finalPayload = [...finalPayload, ...memoryCache.zoe];
-    else if (targetView === 'work') finalPayload = [...finalPayload, ...memoryCache.work];
-    else if (targetView === 'family') finalPayload = [...finalPayload, ...memoryCache.family];
+    
+    // Strict separation alignment logic: Only mix feeds into exact destinations
+    if (targetView === 'combined') {
+      finalPayload = [...finalPayload, ...memoryCache.liam, ...memoryCache.zoe, ...memoryCache.work, ...memoryCache.family];
+    } else if (targetView === 'liam') {
+      finalPayload = [...finalPayload, ...memoryCache.liam];
+    } else if (targetView === 'zoe') {
+      // Everything from Zoe's raw feed lives exclusively here unless sorted out
+      finalPayload = [...finalPayload, ...memoryCache.zoe];
+    } else if (targetView === 'work') {
+      finalPayload = [...finalPayload, ...memoryCache.work];
+    } else if (targetView === 'family') {
+      finalPayload = [...finalPayload, ...memoryCache.family];
+    }
 
     res.json(finalPayload);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ROUTING MANEUVER: Transfers an event to another bucket
+app.post('/api/events/route', async (req, res) => {
+  const { eventId, title, start, end, description, targetCalendar, isExternal } = req.body;
+  try {
+    if (isExternal) {
+      // 1. Write as a permanent local record under your target scope
+      await pool.query(
+        'INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5)',
+        [title.replace('❓ ', ''), start, end || null, description, targetCalendar]
+      );
+      // 2. Add to external learning suppression map so it disappears from the original automated feed
+      await pool.query(
+        'INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status',
+        [eventId, 'blocked']
+      );
+    } else {
+      // If it's already a local entry, simply modify its current target destination column
+      await pool.query('UPDATE events SET calendar = $1 WHERE id = $2', [targetCalendar, eventId]);
+    }
+
+    await updateAllCalendarsCache();
+    res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -168,10 +204,7 @@ app.post('/api/events/learn', async (req, res) => {
   const { eventId, status } = req.body; 
   try {
     await pool.query(
-      `INSERT INTO event_learning_states (event_id, status) 
-       VALUES ($1, $2) 
-       ON CONFLICT (event_id) 
-       DO UPDATE SET status = EXCLUDED.status`,
+      'INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status',
       [eventId, status]
     );
     await updateAllCalendarsCache();
@@ -217,4 +250,4 @@ app.post('/api/general-notes', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => console.log(`Backend engine running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Routing Engine running on port ${PORT}`));
