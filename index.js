@@ -4,7 +4,7 @@ import pkg from 'pg';
 import pdfParse from 'pdf-parse';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
-import ical from 'node-ical'; // <-- Make sure this import is here
+import ical from 'node-ical';
 
 dotenv.config();
 
@@ -21,8 +21,16 @@ const pool = new Pool({
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
+// Global server cache layout to keep tab switching fast (expires in 5 minutes)
+let memoryCache = {
+  liam: { data: [], lastFetched: 0 },
+  zoe: { data: [], lastFetched: 0 },
+  work: { data: [], lastFetched: 0 },
+  family: { data: [], lastFetched: 0 }
+};
+const CACHE_TIMEOUT = 5 * 60 * 1000; 
+
 const initDb = async () => {
-  // Added a 'calendar' column to track where AI-uploaded events go
   await pool.query(`
     CREATE TABLE IF NOT EXISTS events (
       id SERIAL PRIMARY KEY,
@@ -62,20 +70,59 @@ async function extractEventsWithAI(text) {
   return JSON.parse(response.text);
 }
 
+// Helper to stream, parse, and clean external iCal URLs
+const fetchExternalCalendar = async (url, defaultColor) => {
+  if (!url) return [];
+  try {
+    const data = await ical.async.fromURL(url);
+    return Object.values(data)
+      .filter(event => event.type === 'VEVENT')
+      .map(event => ({
+        id: event.uid,
+        title: event.summary,
+        start: event.start,
+        end: event.end,
+        description: event.description || '',
+        color: defaultColor
+      }));
+  } catch (err) {
+    console.error(`Error parsing link stream: ${url.substring(0, 30)}...`, err.message);
+    return [];
+  }
+};
+
 // ==========================================
-// UPGRADED MULTI-CALENDAR SYNC ROUTE
+// OPTIMIZED MULTI-CALENDAR SYNC ROUTE
 // ==========================================
 app.get('/api/events', async (req, res) => {
-  const { calendar } = req.query; // Captures the channel (e.g. ?calendar=zoe)
-  let eventsList = [];
+  const targetView = req.query.calendar || 'combined';
+  const now = Date.now();
 
   try {
-    // 1. Fetch Local Database Events from Neon
+    // 1. Pull Fresh Stream Feeds only if cache expired or empty
+    if (now - memoryCache.liam.lastFetched > CACHE_TIMEOUT) {
+      memoryCache.liam.data = await fetchExternalCalendar(process.env.ICAL_URL_LIAM, '#10b981');
+      memoryCache.liam.lastFetched = now;
+    }
+    if (now - memoryCache.zoe.lastFetched > CACHE_TIMEOUT) {
+      memoryCache.zoe.data = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, '#f43f5e');
+      memoryCache.zoe.lastFetched = now;
+    }
+    if (now - memoryCache.work.lastFetched > CACHE_TIMEOUT) {
+      memoryCache.work.data = await fetchExternalCalendar(process.env.ICAL_URL_WORK, '#818cf8');
+      memoryCache.work.lastFetched = now;
+    }
+    if (now - memoryCache.family.lastFetched > CACHE_TIMEOUT) {
+      memoryCache.family.data = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, '#f59e0b');
+      memoryCache.family.lastFetched = now;
+    }
+
+    // 2. Query Neon Database Events
     let dbResult;
-    if (!calendar || calendar === 'combined') {
+    if (targetView === 'combined') {
       dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
     } else {
-      dbResult = await pool.query('SELECT * FROM events WHERE calendar = $1 ORDER BY start_time ASC', [calendar]);
+      dbResult = await pool.query('SELECT * FROM events WHERE calendar = $1 ORDER BY start_time ASC', [targetView]);
     }
 
     const localEvents = dbResult.rows.map(row => ({
@@ -84,57 +131,34 @@ app.get('/api/events', async (req, res) => {
       start: row.start_time,
       end: row.end_time,
       description: row.description,
-      // Default color if it doesn't match an external stream
       color: row.calendar === 'zoe' ? '#f43f5e' : row.calendar === 'work' ? '#818cf8' : row.calendar === 'family' ? '#f59e0b' : '#38bdf8'
     }));
 
-    eventsList = [...localEvents];
+    // 3. Strict Filter Delivery Matrix
+    let finalPayload = [...localEvents];
 
-    // Helper to stream, parse, and clean external iCal URLs
-    const fetchExternalCalendar = async (url, defaultColor) => {
-      if (!url) return [];
-      try {
-        const data = await ical.async.fromURL(url);
-        return Object.values(data)
-          .filter(event => event.type === 'VEVENT')
-          .map(event => ({
-            id: event.uid,
-            title: event.summary,
-            start: event.start,
-            end: event.end,
-            description: event.description || '',
-            color: defaultColor // Assign color palette matching your frontend theme
-          }));
-      } catch (err) {
-        console.error(`Error parsing link stream: ${url.substring(0, 30)}...`, err.message);
-        return [];
-      }
-    };
-
-    // 2. Mix in Live Feeds Depending on Active Frontend View Matrix
-    if (!calendar || calendar === 'liam' || calendar === 'combined') {
-      const gcalLiam = await fetchExternalCalendar(process.env.ICAL_URL_LIAM, '#10b981'); // Emerald Green
-      eventsList = [...eventsList, ...gcalLiam];
-    }
-    
-    if (!calendar || calendar === 'zoe' || calendar === 'combined') {
-      const gcalZoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, '#f43f5e'); // Rose Pink
-      eventsList = [...eventsList, ...gcalZoe];
-    }
-    
-    if (!calendar || calendar === 'work' || calendar === 'combined') {
-      const outlookWork = await fetchExternalCalendar(process.env.ICAL_URL_WORK, '#818cf8'); // Indigo Blue
-      eventsList = [...eventsList, ...outlookWork];
-    }
-    
-    if (!calendar || calendar === 'family' || calendar === 'combined') {
-      const appleFamily = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, '#f59e0b'); // Amber Orange
-      eventsList = [...eventsList, ...appleFamily];
+    if (targetView === 'combined') {
+      finalPayload = [
+        ...finalPayload,
+        ...memoryCache.liam.data,
+        ...memoryCache.zoe.data,
+        ...memoryCache.work.data,
+        ...memoryCache.family.data
+      ];
+    } else if (targetView === 'liam') {
+      finalPayload = [...finalPayload, ...memoryCache.liam.data];
+    } else if (targetView === 'zoe') {
+      finalPayload = [...finalPayload, ...memoryCache.zoe.data];
+    } else if (targetView === 'work') {
+      finalPayload = [...finalPayload, ...memoryCache.work.data];
+    } else if (targetView === 'family') {
+      finalPayload = [...finalPayload, ...memoryCache.family.data];
     }
 
-    res.json(eventsList);
+    res.json(finalPayload);
 
   } catch (err) {
+    console.error("Pipeline failure:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -158,7 +182,7 @@ app.post('/api/upload-document', express.raw({ type: 'application/pdf', limit: '
     const events = await extractEventsWithAI(parsedPdf.text);
     res.json({ success: true, events });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).success(false).json({ error: err.message });
   }
 });
 
