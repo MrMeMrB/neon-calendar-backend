@@ -21,14 +21,13 @@ const pool = new Pool({
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// Global server cache layout to keep tab switching fast (expires in 5 minutes)
+// Global cache storage
 let memoryCache = {
-  liam: { data: [], lastFetched: 0 },
-  zoe: { data: [], lastFetched: 0 },
-  work: { data: [], lastFetched: 0 },
-  family: { data: [], lastFetched: 0 }
+  liam: [],
+  zoe: [],
+  work: [],
+  family: []
 };
-const CACHE_TIMEOUT = 5 * 60 * 1000; 
 
 const initDb = async () => {
   await pool.query(`
@@ -70,13 +69,26 @@ async function extractEventsWithAI(text) {
   return JSON.parse(response.text);
 }
 
-// Helper to stream, parse, and clean external iCal URLs
+// ==========================================================
+// TIME WINDOW FILTER & ICAL FETCH ENGINE
+// ==========================================================
 const fetchExternalCalendar = async (url, defaultColor) => {
   if (!url) return [];
   try {
     const data = await ical.async.fromURL(url);
+    
+    // Define our 3-month sliding window boundaries
+    const now = new Date();
+    const startWindow = new Date(now.getFullYear(), now.getMonth() - 1, 1); // Start of last month
+    const endWindow = new Date(now.getFullYear(), now.getMonth() + 2, 0);  // End of next month
+
     return Object.values(data)
-      .filter(event => event.type === 'VEVENT')
+      .filter(event => {
+        if (event.type !== 'VEVENT' || !event.start) return false;
+        const eventStart = new Date(event.start);
+        // Only keep the event if it fits inside our 3-month window
+        return eventStart >= startWindow && eventStart <= endWindow;
+      })
       .map(event => ({
         id: event.uid,
         title: event.summary,
@@ -91,33 +103,32 @@ const fetchExternalCalendar = async (url, defaultColor) => {
   }
 };
 
+// Background Worker: Refreshes cache completely out-of-band every 5 minutes
+const updateAllCalendarsCache = async () => {
+  console.log("⚡ Starting background sync of external calendar streams...");
+  try {
+    if (process.env.ICAL_URL_LIAM) memoryCache.liam = await fetchExternalCalendar(process.env.ICAL_URL_LIAM, '#10b981');
+    if (process.env.ICAL_URL_ZOE) memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, '#f43f5e');
+    if (process.env.ICAL_URL_WORK) memoryCache.work = await fetchExternalCalendar(process.env.ICAL_URL_WORK, '#818cf8');
+    if (process.env.ICAL_URL_FAMILY) memoryCache.family = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, '#f59e0b');
+    console.log("✅ Background sync complete. Cache warmed.");
+  } catch (err) {
+    console.error("Background sync failed:", err.message);
+  }
+};
+
+// Run sync immediately on startup, then every 5 minutes
+updateAllCalendarsCache();
+setInterval(updateAllCalendarsCache, 5 * 60 * 1000);
+
 // ==========================================
-// OPTIMIZED MULTI-CALENDAR SYNC ROUTE
+// MULTI-CALENDAR ROUTE (NOW INSTANT)
 // ==========================================
 app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
-  const now = Date.now();
 
   try {
-    // 1. Pull Fresh Stream Feeds only if cache expired or empty
-    if (now - memoryCache.liam.lastFetched > CACHE_TIMEOUT) {
-      memoryCache.liam.data = await fetchExternalCalendar(process.env.ICAL_URL_LIAM, '#10b981');
-      memoryCache.liam.lastFetched = now;
-    }
-    if (now - memoryCache.zoe.lastFetched > CACHE_TIMEOUT) {
-      memoryCache.zoe.data = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, '#f43f5e');
-      memoryCache.zoe.lastFetched = now;
-    }
-    if (now - memoryCache.work.lastFetched > CACHE_TIMEOUT) {
-      memoryCache.work.data = await fetchExternalCalendar(process.env.ICAL_URL_WORK, '#818cf8');
-      memoryCache.work.lastFetched = now;
-    }
-    if (now - memoryCache.family.lastFetched > CACHE_TIMEOUT) {
-      memoryCache.family.data = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, '#f59e0b');
-      memoryCache.family.lastFetched = now;
-    }
-
-    // 2. Query Neon Database Events
+    // 1. Query Neon Database Events
     let dbResult;
     if (targetView === 'combined') {
       dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
@@ -134,25 +145,25 @@ app.get('/api/events', async (req, res) => {
       color: row.calendar === 'zoe' ? '#f43f5e' : row.calendar === 'work' ? '#818cf8' : row.calendar === 'family' ? '#f59e0b' : '#38bdf8'
     }));
 
-    // 3. Strict Filter Delivery Matrix
+    // 2. Build Response Payload straight from the instant memory cache
     let finalPayload = [...localEvents];
 
     if (targetView === 'combined') {
       finalPayload = [
         ...finalPayload,
-        ...memoryCache.liam.data,
-        ...memoryCache.zoe.data,
-        ...memoryCache.work.data,
-        ...memoryCache.family.data
+        ...memoryCache.liam,
+        ...memoryCache.zoe,
+        ...memoryCache.work,
+        ...memoryCache.family
       ];
     } else if (targetView === 'liam') {
-      finalPayload = [...finalPayload, ...memoryCache.liam.data];
+      finalPayload = [...finalPayload, ...memoryCache.liam];
     } else if (targetView === 'zoe') {
-      finalPayload = [...finalPayload, ...memoryCache.zoe.data];
+      finalPayload = [...finalPayload, ...memoryCache.zoe];
     } else if (targetView === 'work') {
-      finalPayload = [...finalPayload, ...memoryCache.work.data];
+      finalPayload = [...finalPayload, ...memoryCache.work];
     } else if (targetView === 'family') {
-      finalPayload = [...finalPayload, ...memoryCache.family.data];
+      finalPayload = [...finalPayload, ...memoryCache.family];
     }
 
     res.json(finalPayload);
@@ -163,6 +174,7 @@ app.get('/api/events', async (req, res) => {
   }
 });
 
+// Post routes and listener remain exactly the same...
 app.post('/api/events', async (req, res) => {
   const { title, start, end, description, calendar } = req.body;
   try {
@@ -182,7 +194,7 @@ app.post('/api/upload-document', express.raw({ type: 'application/pdf', limit: '
     const events = await extractEventsWithAI(parsedPdf.text);
     res.json({ success: true, events });
   } catch (err) {
-    res.status(500).success(false).json({ error: err.message });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
