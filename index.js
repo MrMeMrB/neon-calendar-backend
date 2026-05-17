@@ -19,7 +19,6 @@ const pool = new Pool({
 
 let memoryCache = { liam: [], zoe: [], work: [], family: [] };
 
-// Softer keyword set to catch potential matches
 const KIDS_KEYWORDS = [
   'jasper', 'indie', 'jb', 'ib school', 'phonics', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 
   'parents', 'term', 'half term', 'summer holiday', 'holiday', 'haven', 'centre'
@@ -54,12 +53,11 @@ const initDb = async () => {
     );
   `);
 
-  // Unified learning table tracking manual validation states
   await pool.query(`
     CREATE TABLE IF NOT EXISTS event_learning_states (
       id SERIAL PRIMARY KEY,
       event_id VARCHAR(255) UNIQUE NOT NULL,
-      status VARCHAR(50) NOT NULL, -- 'verified_kid', 'blocked'
+      status VARCHAR(50) NOT NULL, 
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
@@ -76,38 +74,34 @@ const fetchExternalCalendar = async (url, defaultColor, applyZoeKidsFilter = fal
     const startWindow = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const endWindow = new Date(now.getFullYear(), now.getMonth() + 2, 0);
 
-    // Pull learning records
     const stateResult = await pool.query('SELECT event_id, status FROM event_learning_states');
     const stateMap = new Map(stateResult.rows.map(r => [r.event_id, r.status]));
 
     return Object.values(data)
       .filter(event => {
         if (event.type !== 'VEVENT' || !event.start) return false;
-        if (stateMap.get(event.uid) === 'blocked') return false; // Hard hide if blocked
+        if (stateMap.get(event.uid) === 'blocked') return false; 
 
         const eventStart = new Date(event.start);
         return eventStart >= startWindow && eventStart <= endWindow;
       })
       .filter(event => {
-        // If not Zoe's stream, let everything pass
         if (!applyZoeKidsFilter) return true;
-
-        // If explicitly approved before, let it pass
         if (stateMap.get(event.uid) === 'verified_kid') return true;
 
-        // Run soft keyword matching
         const textPayload = `${event.summary || ''} ${event.description || ''}`.toLowerCase();
         return KIDS_KEYWORDS.some(keyword => textPayload.includes(keyword));
       })
       .map(event => {
         const status = stateMap.get(event.uid) || 'unverified';
         let title = event.summary;
-        let color = defaultColor;
+        let color = defaultColor; 
         let isUnverified = false;
 
+        // If it hasn't been approved yet, fade it down and give it a ? mark
         if (applyZoeKidsFilter && status === 'unverified') {
           title = `❓ ${title}`;
-          color = '#4b5563'; // Muted dark slate gray for unverified items
+          color = '#4b5563'; 
           isUnverified = true;
         }
 
@@ -139,7 +133,6 @@ const updateAllCalendarsCache = async () => {
 updateAllCalendarsCache();
 setInterval(updateAllCalendarsCache, 5 * 60 * 1000);
 
-// ENDPOINTS
 app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
@@ -171,12 +164,14 @@ app.get('/api/events', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Update the learning status of an external stream item
 app.post('/api/events/learn', async (req, res) => {
-  const { eventId, status } = req.body; // status can be 'verified_kid' or 'blocked'
+  const { eventId, status } = req.body; 
   try {
     await pool.query(
-      'INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status',
+      `INSERT INTO event_learning_states (event_id, status) 
+       VALUES ($1, $2) 
+       ON CONFLICT (event_id) 
+       DO UPDATE SET status = EXCLUDED.status`,
       [eventId, status]
     );
     await updateAllCalendarsCache();
@@ -210,7 +205,7 @@ app.post('/api/events/:id/notes', async (req, res) => {
 app.get('/api/general-notes', async (req, res) => {
   try {
     const result = await pool.query('SELECT content FROM general_notes ORDER BY id DESC LIMIT 1');
-    res.json({ content: r.rows[0]?.content || "" });
+    res.json({ content: result.rows[0]?.content || "" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
