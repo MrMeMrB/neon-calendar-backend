@@ -3,6 +3,8 @@ import cors from 'cors';
 import pkg from 'pg';
 import dotenv from 'dotenv';
 import ical from 'node-ical';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 
 dotenv.config();
 
@@ -12,16 +14,28 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
+const JWT_SECRET = process.env.JWT_SECRET || 'SUPER_MATRIX_SECRET_KEY_999!';
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Explicitly separate our cache arrays globally
 let ZOE_CACHE = [];
 let WORK_CACHE = [];
 
+// Automated DB Initialization & Seed Script
 const initDb = async () => {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      username VARCHAR(50) UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role VARCHAR(20) DEFAULT 'user',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS events (
       id SERIAL PRIMARY KEY,
@@ -44,107 +58,137 @@ const initDb = async () => {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
-  console.log("Database initialized successfully.");
+
+  // Auto-seed the core users dynamically if they do not exist
+  const userCheck = await pool.query('SELECT * FROM users WHERE username IN ($1, $2)', ['LiamBaker', 'ZoeHenry']);
+  if (userCheck.rows.length === 0) {
+    const liamHash = await bcrypt.hash('L1@m19892022', 10);
+    const zoeHash = await bcrypt.hash('password123', 10); // Replace with her temporary secure string as required
+
+    await pool.query('INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', ['LiamBaker', liamHash, 'admin']);
+    await pool.query('INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', ['ZoeHenry', zoeHash, 'user']);
+    console.log("System Security Roles seeded successfully.");
+  }
+  console.log("Database schema fully synced.");
 };
 initDb().catch(console.error);
 
-const syncZoeFeed = async () => {
-  if (!process.env.ICAL_URL_ZOE) {
-    console.log("Zoe URL missing from environment variables.");
-    return;
+// AUTHENTICATION MIDDLEWARES
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: "Access token omitted." });
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: "Token signature validation failed." });
+    req.user = user;
+    next();
+  });
+};
+
+const requireAdmin = (req, res, next) => {
+  if (req.user && req.user.role === 'admin') {
+    next();
+  } else {
+    res.status(403).json({ error: "Administrative clearance level required." });
   }
+};
+
+// EXTERNAL DATA FEED STREAMERS
+const syncZoeFeed = async () => {
+  if (!process.env.ICAL_URL_ZOE) return;
   try {
-    const data = await ical.async.fromURL(process.env.ICAL_URL_ZOE, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    
+    const data = await ical.async.fromURL(process.env.ICAL_URL_ZOE, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     const now = new Date();
     const startWindow = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const endWindow = new Date(now.getFullYear(), now.getMonth() + 2, 0);
-
     const stateResult = await pool.query('SELECT event_id FROM event_learning_states WHERE status = $1', ['blocked']);
     const blockedIds = new Set(stateResult.rows.map(r => r.event_id));
 
     ZOE_CACHE = Object.values(data)
       .filter(e => e.type === 'VEVENT' && e.start && !blockedIds.has(e.uid))
-      .filter(e => {
-        const s = new Date(e.start);
-        return s >= startWindow && s <= endWindow;
-      })
+      .filter(e => { const s = new Date(e.start); return s >= startWindow && s <= endWindow; })
       .map(e => ({
-        id: e.uid,
-        title: e.summary || "Zoe Event",
-        start: new Date(e.start).toISOString(),
-        end: e.end ? new Date(e.end).toISOString() : null,
-        description: e.description || '',
-        color: '#f43f5e',
-        calendar: 'zoe',
-        isExternal: true
+        id: e.uid, title: e.summary || "Zoe Event",
+        start: new Date(e.start).toISOString(), end: e.end ? new Date(e.end).toISOString() : null,
+        description: e.description || '', color: '#f43f5e', calendar: 'zoe', isExternal: true
       }));
-    console.log(`Zoe Cache updated successfully: ${ZOE_CACHE.length} items.`);
-  } catch (err) {
-    console.error("Zoe sync encountered an error:", err.message);
-  }
+    console.log(`Zoe Feed Cached: ${ZOE_CACHE.length} items.`);
+  } catch (err) { console.error("Zoe iCal Sync Failure:", err.message); }
 };
 
 const syncWorkFeed = async () => {
-  if (!process.env.ICAL_URL_WORK) {
-    console.log("Work URL missing from environment variables.");
-    return;
-  }
+  if (!process.env.ICAL_URL_WORK) return;
   try {
-    const data = await ical.async.fromURL(process.env.ICAL_URL_WORK, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    
+    const data = await ical.async.fromURL(process.env.ICAL_URL_WORK, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     const now = new Date();
     const startWindow = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const endWindow = new Date(now.getFullYear(), now.getMonth() + 2, 0);
-
     const stateResult = await pool.query('SELECT event_id FROM event_learning_states WHERE status = $1', ['blocked']);
     const blockedIds = new Set(stateResult.rows.map(r => r.event_id));
 
     WORK_CACHE = Object.values(data)
       .filter(e => e.type === 'VEVENT' && e.start && !blockedIds.has(e.uid))
-      .filter(e => {
-        const s = new Date(e.start);
-        return s >= startWindow && s <= endWindow;
-      })
+      .filter(e => { const s = new Date(e.start); return s >= startWindow && s <= endWindow; })
       .map(e => {
         let title = e.summary || "Work Event";
-        const isTentative = e['X-MICROSOFT-CDO-BUSYSTATUS'] === 'TENTATIVE' || String(e.description).includes('Tentative');
-        if (isTentative) title = `⏳ [Tentative] ${title}`;
-
+        if (e['X-MICROSOFT-CDO-BUSYSTATUS'] === 'TENTATIVE' || String(e.description).includes('Tentative')) title = `⏳ [Tentative] ${title}`;
         return {
-          id: e.uid,
-          title: title,
-          start: new Date(e.start).toISOString(),
-          end: e.end ? new Date(e.end).toISOString() : null,
-          description: e.description || '',
-          color: '#818cf8',
-          calendar: 'work',
-          isExternal: true
+          id: e.uid, title, start: new Date(e.start).toISOString(), end: e.end ? new Date(e.end).toISOString() : null,
+          description: e.description || '', color: '#818cf8', calendar: 'work', isExternal: true
         };
       });
-    console.log(`Work Cache updated successfully: ${WORK_CACHE.length} items.`);
-  } catch (err) {
-    console.error("Work sync encountered an error:", err.message);
-  }
+    console.log(`Work Feed Cached: ${WORK_CACHE.length} items.`);
+  } catch (err) { console.error("Work iCal Sync Failure:", err.message); }
 };
 
-// CRITICAL FIX: Safe, independent execution wrapper
-const runAllSyncs = async () => {
-  console.log("Starting calendar data sync sequence...");
-  await syncZoeFeed();
-  await syncWorkFeed();
-  console.log("Calendar sync sequence complete.");
-};
-
-// Run immediately on boot and set interval
+const runAllSyncs = async () => { await syncZoeFeed(); await syncWorkFeed(); };
 runAllSyncs();
 setInterval(runAllSyncs, 5 * 60 * 1000);
 
-app.get('/api/events', async (req, res) => {
+// API AUTH ROUTING ENDPOINTS
+app.post('/api/auth/login', async (req, res) => {
+  const { username, password } = req.body;
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+    if (result.rows.length === 0) return res.status(401).json({ error: "Invalid credential logs." });
+
+    const user = result.rows[0];
+    const validPass = await bcrypt.compare(password, user.password_hash);
+    if (!validPass) return res.status(401).json({ error: "Invalid credential logs." });
+
+    const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '24h' });
+    res.json({ token, user: { username: user.username, role: user.role } });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ADMIN USER CONTROL ROUTE BLOCK
+app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, username, role, created_at FROM users ORDER BY id ASC');
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
+  const { username, password, role } = req.body;
+  try {
+    const hashed = await bcrypt.hash(password, 10);
+    await pool.query('INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3)', [username, hashed, role || 'user']);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: "User already exists or inputs invalid." }); }
+});
+
+app.delete('/api/admin/users/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    if (parseInt(req.params.id) === req.user.id) return res.status(400).json({ error: "Self-termination blocked." });
+    await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// CALENDAR SYSTEM MATRIX DISPATCHER
+app.get('/api/events', authenticateToken, async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
     let dbResult;
@@ -155,81 +199,25 @@ app.get('/api/events', async (req, res) => {
     }
 
     const localEvents = dbResult.rows.map(row => ({
-      id: String(row.id),
-      title: row.title,
-      start: new Date(row.start_time).toISOString(),
-      end: row.end_time ? new Date(row.end_time).toISOString() : null,
-      description: row.description || '',
-      calendar: row.calendar || 'combined',
-      isExternal: false,
-      color: row.calendar === 'zoe' ? '#f43f5e' : 
-             row.calendar === 'work' ? '#818cf8' : 
-             row.calendar === 'liam-life' ? '#00f0ff' : 
-             row.calendar === 'kids-logs' ? '#ec4899' : '#10b981',
-      metricSentiment: row.metric_sentiment,
-      metricLocation: row.metric_location,
-      metricSeverity: row.metric_severity
+      id: String(row.id), title: row.title,
+      start: new Date(row.start_time).toISOString(), end: row.end_time ? new Date(row.end_time).toISOString() : null,
+      description: row.description || '', calendar: row.calendar || 'combined', isExternal: false,
+      color: row.calendar === 'zoe' ? '#f43f5e' : row.calendar === 'work' ? '#818cf8' : row.calendar === 'liam-life' ? '#00f0ff' : row.calendar === 'kids-logs' ? '#ec4899' : '#10b981',
+      metricSentiment: row.metric_sentiment, metricLocation: row.metric_location, metricSeverity: row.metric_severity
     }));
 
-    if (targetView === 'combined') {
-      return res.json([...localEvents, ...ZOE_CACHE, ...WORK_CACHE]);
-    }
-
-    if (targetView === 'zoe') {
-      return res.json([...localEvents, ...ZOE_CACHE]);
-    }
-
-    if (targetView === 'work') {
-      return res.json([...localEvents, ...WORK_CACHE]);
-    }
-
-    // Liam's Life and Kids Logs views pull strictly from the local database
+    if (targetView === 'combined') return res.json([...localEvents, ...ZOE_CACHE, ...WORK_CACHE]);
+    if (targetView === 'zoe') return res.json([...localEvents, ...ZOE_CACHE]);
+    if (targetView === 'work') return res.json([...localEvents, ...WORK_CACHE]);
     return res.json(localEvents);
-
-  } catch (err) { 
-    res.status(500).json({ error: err.message }); 
-  }
-});
-
-app.post('/api/events/route', async (req, res) => {
-  const { eventId, title, start, end, description, targetCalendar, isExternal } = req.body;
-  try {
-    await pool.query(
-      'INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5)',
-      [title, start, end || null, description, targetCalendar]
-    );
-
-    if (isExternal) {
-      await pool.query(
-        'INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status',
-        [eventId, 'blocked']
-      );
-    }
-    await runAllSyncs();
-    res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/events/learn', async (req, res) => {
-  const { eventId, status } = req.body; 
-  try {
-    await pool.query(
-      'INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status',
-      [eventId, status]
-    );
-    await runAllSyncs();
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/events', async (req, res) => {
+app.post('/api/events', authenticateToken, async (req, res) => {
   const { title, start, end, description, calendar, metricSentiment, metricLocation, metricSeverity } = req.body;
   try {
     const result = await pool.query(
-      `INSERT INTO events 
-       (title, start_time, end_time, description, calendar, metric_sentiment, metric_location, metric_severity) 
+      `INSERT INTO events (title, start_time, end_time, description, calendar, metric_sentiment, metric_location, metric_severity) 
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`, 
       [title, start, end || null, description || '', calendar || 'combined', metricSentiment || null, metricLocation || null, metricSeverity ? parseInt(metricSeverity) : 0]
     );
@@ -237,5 +225,23 @@ app.post('/api/events', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.post('/api/events/route', authenticateToken, async (req, res) => {
+  const { eventId, title, start, end, description, targetCalendar, isExternal } = req.body;
+  try {
+    await pool.query('INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5)', [title, start, end || null, description, targetCalendar]);
+    if (isExternal) await pool.query('INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status', [eventId, 'blocked']);
+    await runAllSyncs();
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/events/learn', authenticateToken, async (req, res) => {
+  try {
+    await pool.query('INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status', [req.body.eventId, req.body.status]);
+    await runAllSyncs();
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => console.log(`Isolation engine active on port ${PORT}`));
+app.listen(PORT, () => console.log(`Secure Infrastructure engine active on port ${PORT}`));
