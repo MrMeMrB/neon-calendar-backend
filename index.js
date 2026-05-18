@@ -66,7 +66,8 @@ const initDb = async () => {
 };
 initDb().catch(console.error);
 
-const fetchExternalCalendar = async (url, defaultColor, applyZoeKidsFilter = false) => {
+// FIXED: Explicitly injecting ownership parameters here so the client side knows how to split tabs
+const fetchExternalCalendar = async (url, defaultColor, applyZoeKidsFilter = false, calendarType = 'work') => {
   if (!url) return [];
   try {
     const data = await ical.async.fromURL(url);
@@ -111,6 +112,7 @@ const fetchExternalCalendar = async (url, defaultColor, applyZoeKidsFilter = fal
           end: event.end,
           description: event.description || '',
           color: color,
+          calendar: calendarType, // Injects 'work' or 'zoe' directly into the data payload
           isUnverified: isUnverified,
           isExternal: true
         };
@@ -123,17 +125,16 @@ const fetchExternalCalendar = async (url, defaultColor, applyZoeKidsFilter = fal
 
 const updateAllCalendarsCache = async () => {
   try {
-    if (process.env.ICAL_URL_LIAM) memoryCache.liam = await fetchExternalCalendar(process.env.ICAL_URL_LIAM, '#10b981');
-    if (process.env.ICAL_URL_ZOE) memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, '#f43f5e', true);
-    if (process.env.ICAL_URL_WORK) memoryCache.work = await fetchExternalCalendar(process.env.ICAL_URL_WORK, '#818cf8');
-    if (process.env.ICAL_URL_FAMILY) memoryCache.family = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, '#f59e0b');
+    if (process.env.ICAL_URL_LIAM) memoryCache.liam = await fetchExternalCalendar(process.env.ICAL_URL_LIAM, '#10b981', false, 'liam');
+    if (process.env.ICAL_URL_ZOE) memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, '#f43f5e', true, 'zoe');
+    if (process.env.ICAL_URL_WORK) memoryCache.work = await fetchExternalCalendar(process.env.ICAL_URL_WORK, '#818cf8', false, 'work');
+    if (process.env.ICAL_URL_FAMILY) memoryCache.family = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, '#f59e0b', false, 'family');
   } catch (err) { console.error(err); }
 };
 
 updateAllCalendarsCache();
 setInterval(updateAllCalendarsCache, 5 * 60 * 1000);
 
-// FIX: EXPLICITLY SYNC WITH FRONTEND SIDEBAR IDS
 app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
@@ -185,7 +186,6 @@ app.get('/api/events', async (req, res) => {
     }
 
     if (targetView === 'kids-logs') {
-      // Correctly serves localized logs array back safely
       return res.json(localEvents);
     }
 
