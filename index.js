@@ -158,12 +158,15 @@ const syncSchoolFeed = async () => {
         start: new Date(e.start).toISOString(),
         end: e.end ? new Date(e.end).toISOString() : null,
         description: e.description || '',
-        calendar: 'school',
+        calendar: 'school', // Explicit clean match for frontend filtering
         color: '#0284c7',
         isExternal: true,
         originCalendar: 'school'
       }));
-  } catch (err) { console.error("School GCal Sync Failure:", err.message); }
+    console.log(`Abington School GCal Cached Natively: ${SCHOOL_CACHE.length} items.`);
+  } catch (err) {
+    console.error("School GCal Sync Failure:", err.message);
+  }
 };
 
 const runAllSyncs = async () => { 
