@@ -45,7 +45,7 @@ const initDb = async () => {
     );
   `);
 
-  console.log("PostgreSQL Target Routing Engine Schema Initialized.");
+  console.log("PostgreSQL Schema Initialized.");
 };
 initDb().catch(console.error);
 
@@ -53,7 +53,7 @@ const fetchExternalCalendar = async (url, domainName, defaultColor, applyZoeKids
   if (!url) return [];
   try {
     const data = await ical.async.fromURL(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
     });
     
     const now = new Date();
@@ -85,6 +85,7 @@ const fetchExternalCalendar = async (url, domainName, defaultColor, applyZoeKids
         let isUnverified = false;
         let targetCalendar = domainName;
 
+        // If it hits the keyword rule and isn't verified, split it off to kids-logs
         if (applyZoeKidsFilter && status === 'unverified') {
           title = `❓ ${title}`;
           color = '#ffaa00'; 
@@ -95,7 +96,7 @@ const fetchExternalCalendar = async (url, domainName, defaultColor, applyZoeKids
         return {
           id: event.uid,
           title: title,
-          start: new Date(event.start).toISOString(), // Normalized Time Frame Alignment
+          start: new Date(event.start).toISOString(),
           end: event.end ? new Date(event.end).toISOString() : null,
           description: event.description || '',
           color: color,
@@ -105,17 +106,19 @@ const fetchExternalCalendar = async (url, domainName, defaultColor, applyZoeKids
         };
       });
   } catch (err) {
-    console.error(`iCal Parse error stream for ${domainName}:`, err.message);
+    console.error(`iCal Parse error for ${domainName}:`, err.message);
     return [];
   }
 };
 
 const updateAllCalendarsCache = async () => {
   try {
+    // FIX: Zoe's clean stream mapped directly to 'zoe', work to 'work', family to 'family'
     if (process.env.ICAL_URL_ZOE) memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, 'zoe', '#f43f5e', true);
     if (process.env.ICAL_URL_WORK) memoryCache.work = await fetchExternalCalendar(process.env.ICAL_URL_WORK, 'work', '#818cf8');
     if (process.env.ICAL_URL_FAMILY) memoryCache.family = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, 'family', '#f59e0b');
-  } catch (err) { console.error(err); }
+    console.log("Memory caches re-indexed successfully.");
+  } catch (err) { console.error("Cache sync failed:", err); }
 };
 
 updateAllCalendarsCache();
@@ -134,7 +137,7 @@ app.get('/api/events', async (req, res) => {
     const localEvents = dbResult.rows.map(row => ({
       id: String(row.id),
       title: row.title,
-      start: new Date(row.start_time).toISOString(), // Normalized Time Frame Alignment
+      start: new Date(row.start_time).toISOString(),
       end: row.end_time ? new Date(row.end_time).toISOString() : null,
       description: row.description || '',
       calendar: row.calendar || 'combined',
@@ -146,14 +149,13 @@ app.get('/api/events', async (req, res) => {
              row.calendar === 'kids-logs' ? '#ec4899' : '#10b981'
     }));
 
-    const allExternal = [
-      ...memoryCache.zoe,
-      ...memoryCache.work,
-      ...memoryCache.family
-    ];
-
     if (targetView === 'combined') {
-      return res.json([...localEvents, ...allExternal]);
+      return res.json([
+        ...localEvents,
+        ...memoryCache.zoe,
+        ...memoryCache.work,
+        ...memoryCache.family
+      ]);
     }
 
     if (targetView === 'kids-logs') {
@@ -161,25 +163,33 @@ app.get('/api/events', async (req, res) => {
       return res.json([...localEvents, ...externalKids]);
     }
 
-    const filteredExternal = allExternal.filter(e => e.calendar === targetView);
-    return res.json([...localEvents, ...filteredExternal]);
+    if (targetView === 'zoe') {
+      const externalZoe = memoryCache.zoe.filter(e => e.calendar === 'zoe');
+      return res.json([...localEvents, ...externalZoe]);
+    }
 
+    if (targetView === 'work') {
+      return res.json([...localEvents, ...memoryCache.work]);
+    }
+
+    if (targetView === 'family') {
+      return res.json([...localEvents, ...memoryCache.family]);
+    }
+
+    res.json(localEvents);
   } catch (err) { 
     res.status(500).json({ error: err.message }); 
   }
 });
 
-// ROUTE EXTERNAL SUBSCRIPTION ITEM INTO INTERNAL LOCAL DATABASE SCTOR
 app.post('/api/events/route', async (req, res) => {
   const { eventId, title, start, end, description, targetCalendar, isExternal } = req.body;
   try {
-    // 1. Inject static copy into internal PostgreSQL Table
     await pool.query(
       'INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5)',
       [title.replace('❓ ', ''), start, end || null, description, targetCalendar]
     );
 
-    // 2. Hide original stream element from memory views by marking it blocked
     if (isExternal) {
       await pool.query(
         'INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status',
@@ -189,12 +199,9 @@ app.post('/api/events/route', async (req, res) => {
 
     await updateAllCalendarsCache();
     res.json({ success: true });
-  } catch (err) { 
-    res.status(500).json({ error: err.message }); 
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// PURGE AND DISMISS WITHOUT SAVING ANY INTERNAL COPIES
 app.post('/api/events/learn', async (req, res) => {
   const { eventId, status } = req.body; 
   try {
@@ -204,6 +211,14 @@ app.post('/api/events/learn', async (req, res) => {
     );
     await updateAllCalendarsCache();
     res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/events', async (req, res) => {
+  const { title, start, end, description, calendar } = req.body;
+  try {
+    const result = await pool.query('INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5) RETURNING *', [title, start, end || null, description || '', calendar || 'combined']);
+    res.json({ success: true, event: result.rows[0] });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
