@@ -17,8 +17,9 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Explicitly separating our cache arrays
-let memoryCache = { zoe: [], work: [], family: [] };
+// Walled-off, completely independent cache arrays
+let ZOE_CACHE = [];
+let WORK_CACHE = [];
 
 const initDb = async () => {
   await pool.query(`
@@ -43,83 +44,102 @@ const initDb = async () => {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
-
-  console.log("Database Operational.");
+  console.log("Database initialized.");
 };
 initDb().catch(console.error);
 
-const fetchExternalCalendar = async (url, domainName, defaultColor) => {
-  if (!url) return [];
+// 1. STRIKT ZOE PARSER (Google Calendar Feed)
+const syncZoeFeed = async () => {
+  if (!process.env.ICAL_URL_ZOE) return;
   try {
-    const data = await ical.async.fromURL(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+    const data = await ical.async.fromURL(process.env.ICAL_URL_ZOE, {
+      headers: { 'User-Agent': 'Mozilla' }
     });
     
     const now = new Date();
     const startWindow = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const endWindow = new Date(now.getFullYear(), now.getMonth() + 2, 0);
 
-    const stateResult = await pool.query('SELECT event_id, status FROM event_learning_states');
-    const stateMap = new Map(stateResult.rows.map(r => [r.event_id, r.status]));
+    const stateResult = await pool.query('SELECT event_id FROM event_learning_states WHERE status = $1', ['blocked']);
+    const blockedIds = new Set(stateResult.rows.map(r => r.event_id));
 
-    return Object.values(data)
-      .filter(event => {
-        if (event.type !== 'VEVENT' || !event.start) return false;
-        if (stateMap.get(event.uid) === 'blocked') return false; 
-
-        const eventStart = new Date(event.start);
-        return eventStart >= startWindow && eventStart <= endWindow;
+    ZOE_CACHE = Object.values(data)
+      .filter(e => e.type === 'VEVENT' && e.start && !blockedIds.has(e.uid))
+      .filter(e => {
+        const s = new Date(e.start);
+        return s >= startWindow && s <= endWindow;
       })
-      .map(event => {
-        let title = event.summary || "Untitled Event";
-        
-        const isTentative = event['X-MICROSOFT-CDO-BUSYSTATUS'] === 'TENTATIVE' || 
-                            String(event.description).includes('Tentative');
-        if (isTentative && domainName === 'work') {
-          title = `⏳ [Tentative] ${title}`;
-        }
+      .map(e => ({
+        id: e.uid,
+        title: e.summary || "Zoe Event",
+        start: new Date(e.start).toISOString(),
+        end: e.end ? new Date(e.end).toISOString() : null,
+        description: e.description || '',
+        color: '#f43f5e',
+        calendar: 'zoe',
+        isExternal: true
+      }));
+    console.log(`Zoe Cache reloaded. Total: ${ZOE_CACHE.length}`);
+  } catch (err) {
+    console.error("Zoe sync failed:", err.message);
+  }
+};
+
+// 2. STRIKT WORK PARSER (Outlook Calendar Feed)
+const syncWorkFeed = async () => {
+  if (!process.env.ICAL_URL_WORK) return;
+  try {
+    const data = await ical.async.fromURL(process.env.ICAL_URL_WORK, {
+      headers: { 'User-Agent': 'Mozilla' }
+    });
+    
+    const now = new Date();
+    const startWindow = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const endWindow = new Date(now.getFullYear(), now.getMonth() + 2, 0);
+
+    const stateResult = await pool.query('SELECT event_id FROM event_learning_states WHERE status = $1', ['blocked']);
+    const blockedIds = new Set(stateResult.rows.map(r => r.event_id));
+
+    WORK_CACHE = Object.values(data)
+      .filter(e => e.type === 'VEVENT' && e.start && !blockedIds.has(e.uid))
+      .filter(e => {
+        const s = new Date(e.start);
+        return s >= startWindow && s <= endWindow;
+      })
+      .map(e => {
+        let title = e.summary || "Work Event";
+        const isTentative = e['X-MICROSOFT-CDO-BUSYSTATUS'] === 'TENTATIVE' || String(e.description).includes('Tentative');
+        if (isTentative) title = `⏳ [Tentative] ${title}`;
 
         return {
-          id: event.uid,
+          id: e.uid,
           title: title,
-          start: new Date(event.start).toISOString(),
-          end: event.end ? new Date(event.end).toISOString() : null,
-          description: event.description || '',
-          color: defaultColor,
-          calendar: domainName, // Strictly locks item to 'work' or 'zoe'
+          start: new Date(e.start).toISOString(),
+          end: e.end ? new Date(e.end).toISOString() : null,
+          description: e.description || '',
+          color: '#818cf8',
+          calendar: 'work',
           isExternal: true
         };
       });
+    console.log(`Work Cache reloaded. Total: ${WORK_CACHE.length}`);
   } catch (err) {
-    console.error(`iCal Parser drop for ${domainName}:`, err.message);
-    return [];
+    console.error("Work sync failed:", err.message);
   }
 };
 
-// FIX: Forcing explicit source separation on caching
-const updateAllCalendarsCache = async () => {
-  try {
-    if (process.env.ICAL_URL_ZOE) {
-      memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, 'zoe', '#f43f5e');
-    }
-    if (process.env.ICAL_URL_WORK) {
-      memoryCache.work = await fetchExternalCalendar(process.env.ICAL_URL_WORK, 'work', '#818cf8');
-    }
-    if (process.env.ICAL_URL_FAMILY) {
-      memoryCache.family = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, 'family', '#f59e0b');
-    }
-    console.log("Cache successfully separated. Zoe count:", memoryCache.zoe.length, "Work count:", memoryCache.work.length);
-  } catch (err) { 
-    console.error("Cache sync failed:", err); 
-  }
+const runAllSyncs = async () => {
+  await syncZoeFeed();
+  await syncWorkFeed();
 };
+runAllSyncs();
+setInterval(runAllSyncs, 5 * 60 * 1000);
 
-updateAllCalendarsCache();
-setInterval(updateAllCalendarsCache, 5 * 60 * 1000);
-
+// 3. HARD RE-MAPPING OF THE ROUTING DISPATCHER
 app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
+    // Look up local database configurations
     let dbResult;
     if (targetView === 'combined') {
       dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
@@ -144,33 +164,22 @@ app.get('/api/events', async (req, res) => {
       metricSeverity: row.metric_severity
     }));
 
-    // 1. COMBINED: Everything together
+    // TARGET ROUTING VERIFICATION LOGIC:
     if (targetView === 'combined') {
-      return res.json([
-        ...localEvents,
-        ...memoryCache.zoe,
-        ...memoryCache.work,
-        ...memoryCache.family
-      ]);
+      return res.json([...localEvents, ...ZOE_CACHE, ...WORK_CACHE]);
     }
 
-    // 2. ZOE CALENDAR: Only DB items tagged 'zoe' + Zoe's Google Calendar feed
     if (targetView === 'zoe') {
-      return res.json([
-        ...localEvents, 
-        ...memoryCache.zoe
-      ]);
+      // ONLY Zoe database items + ONLY Zoe automated stream entries
+      return res.json([...localEvents, ...ZOE_CACHE]);
     }
 
-    // 3. WORK CALENDAR: Only DB items tagged 'work' + Outlook feed
     if (targetView === 'work') {
-      return res.json([
-        ...localEvents, 
-        ...memoryCache.work
-      ]);
+      // ONLY Work database items + ONLY Work Outlook entries
+      return res.json([...localEvents, ...WORK_CACHE]);
     }
 
-    // 4. LIAM'S LIFE & KIDS LOGS: Strictly local DB events only
+    // Liam's Life & Kids Logs view branch: Absolutely 0% external items can bleed here.
     return res.json(localEvents);
 
   } catch (err) { 
@@ -192,8 +201,7 @@ app.post('/api/events/route', async (req, res) => {
         [eventId, 'blocked']
       );
     }
-
-    await updateAllCalendarsCache();
+    await runAllSyncs();
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -205,9 +213,9 @@ app.post('/api/events/learn', async (req, res) => {
       'INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status',
       [eventId, status]
     );
-    await updateAllCalendarsCache();
+    await runAllSyncs();
     res.json({ success: true });
-  } catch (err) {}
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/events', async (req, res) => {
@@ -224,4 +232,4 @@ app.post('/api/events', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => console.log(`Separation Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Isolation engine active on port ${PORT}`));
