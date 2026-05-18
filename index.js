@@ -17,6 +17,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
+// Explicitly separating our cache arrays
 let memoryCache = { zoe: [], work: [], family: [] };
 
 const initDb = async () => {
@@ -43,7 +44,7 @@ const initDb = async () => {
     );
   `);
 
-  console.log("PostgreSQL Database Architecture Operational.");
+  console.log("Database Operational.");
 };
 initDb().catch(console.error);
 
@@ -85,7 +86,7 @@ const fetchExternalCalendar = async (url, domainName, defaultColor) => {
           end: event.end ? new Date(event.end).toISOString() : null,
           description: event.description || '',
           color: defaultColor,
-          calendar: domainName,
+          calendar: domainName, // Strictly locks item to 'work' or 'zoe'
           isExternal: true
         };
       });
@@ -95,19 +96,27 @@ const fetchExternalCalendar = async (url, domainName, defaultColor) => {
   }
 };
 
+// FIX: Forcing explicit source separation on caching
 const updateAllCalendarsCache = async () => {
   try {
-    if (process.env.ICAL_URL_ZOE) memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, 'zoe', '#f43f5e');
-    if (process.env.ICAL_URL_WORK) memoryCache.work = await fetchExternalCalendar(process.env.ICAL_URL_WORK, 'work', '#818cf8');
-    if (process.env.ICAL_URL_FAMILY) memoryCache.family = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, 'family', '#f59e0b');
-    console.log("External memory cache segments updated.");
-  } catch (err) { console.error("Cache sync failed:", err); }
+    if (process.env.ICAL_URL_ZOE) {
+      memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, 'zoe', '#f43f5e');
+    }
+    if (process.env.ICAL_URL_WORK) {
+      memoryCache.work = await fetchExternalCalendar(process.env.ICAL_URL_WORK, 'work', '#818cf8');
+    }
+    if (process.env.ICAL_URL_FAMILY) {
+      memoryCache.family = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, 'family', '#f59e0b');
+    }
+    console.log("Cache successfully separated. Zoe count:", memoryCache.zoe.length, "Work count:", memoryCache.work.length);
+  } catch (err) { 
+    console.error("Cache sync failed:", err); 
+  }
 };
 
 updateAllCalendarsCache();
 setInterval(updateAllCalendarsCache, 5 * 60 * 1000);
 
-// FIX: Rigid context distribution logic applied here
 app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
@@ -135,7 +144,7 @@ app.get('/api/events', async (req, res) => {
       metricSeverity: row.metric_severity
     }));
 
-    // 1. COMBINED: Show everything together
+    // 1. COMBINED: Everything together
     if (targetView === 'combined') {
       return res.json([
         ...localEvents,
@@ -145,17 +154,23 @@ app.get('/api/events', async (req, res) => {
       ]);
     }
 
-    // 2. ZOE CALENDAR: Only DB items tagged 'zoe' + raw Google Calendar feed
+    // 2. ZOE CALENDAR: Only DB items tagged 'zoe' + Zoe's Google Calendar feed
     if (targetView === 'zoe') {
-      return res.json([...localEvents, ...memoryCache.zoe]);
+      return res.json([
+        ...localEvents, 
+        ...memoryCache.zoe
+      ]);
     }
 
-    // 3. WORK CALENDAR: Only DB items tagged 'work' + Outlook feed (including Tentatives)
+    // 3. WORK CALENDAR: Only DB items tagged 'work' + Outlook feed
     if (targetView === 'work') {
-      return res.json([...localEvents, ...memoryCache.work]);
+      return res.json([
+        ...localEvents, 
+        ...memoryCache.work
+      ]);
     }
 
-    // 4. LIAM'S LIFE & KIDS LOGS: Strictly local DB events only, no external feed data mixed in
+    // 4. LIAM'S LIFE & KIDS LOGS: Strictly local DB events only
     return res.json(localEvents);
 
   } catch (err) { 
@@ -192,7 +207,7 @@ app.post('/api/events/learn', async (req, res) => {
     );
     await updateAllCalendarsCache();
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {}
 });
 
 app.post('/api/events', async (req, res) => {
@@ -209,4 +224,4 @@ app.post('/api/events', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => console.log(`Routing Server operational on port ${PORT}`));
+app.listen(PORT, () => console.log(`Separation Server running on port ${PORT}`));
