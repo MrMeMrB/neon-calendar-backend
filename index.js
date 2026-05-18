@@ -147,7 +147,7 @@ const syncSchoolFeed = async () => {
     const data = await ical.async.fromURL(schoolUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     
     const now = new Date();
-    // CHANGED: Widened the cache window to catch 6 months ago up to 12 months in the future
+    // Catch 6 months back and 12 months forward to make sure all school terms show up
     const startWindow = new Date(now.getFullYear(), now.getMonth() - 6, 1);
     const endWindow = new Date(now.getFullYear(), now.getMonth() + 12, 0);
 
@@ -198,7 +198,7 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// CALENDAR SYSTEM MATRIX DISPATCHER - THE UNIVERSAL FLATTENED ROUTE
+// CALENDAR SYSTEM MATRIX DISPATCHER - FIXED EXPLICIT OVERRIDES
 app.get('/api/events', authenticateToken, async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
@@ -219,16 +219,38 @@ app.get('/api/events', authenticateToken, async (req, res) => {
       metricSeverity: row.metric_severity
     }));
 
-    // 2. Append all volatile operational streams immediately into a single runtime structure
-    const masterPool = [...localEvents, ...ZOE_CACHE, ...WORK_CACHE, ...SCHOOL_CACHE];
-
-    // 3. Evaluate matching query parameters directly using Javascript filter constraints
-    if (targetView === 'combined') {
-      return res.json(masterPool);
+    // 2. EXPLICIT ROUTE INTERCEPTORS (Guarantees data pops on separate tabs)
+    if (targetView === 'school') {
+      const manualSchool = localEvents.filter(e => e.calendar === 'school');
+      const totalSchool = [...manualSchool, ...SCHOOL_CACHE].sort((a, b) => new Date(a.start) - new Date(b.start));
+      return res.json(totalSchool);
     }
 
-    // Handles direct parsing parameters for 'zoe', 'work', 'school', 'liam-life', 'kids-logs'
-    const dynamicSlice = masterPool.filter(event => String(event.calendar).toLowerCase() === String(targetView).toLowerCase());
+    if (targetView === 'zoe') {
+      const manualZoe = localEvents.filter(e => e.calendar === 'zoe');
+      const totalZoe = [...manualZoe, ...ZOE_CACHE].sort((a, b) => new Date(a.start) - new Date(b.start));
+      return res.json(totalZoe);
+    }
+
+    if (targetView === 'work') {
+      const manualWork = localEvents.filter(e => e.calendar === 'work');
+      const totalWork = [...manualWork, ...WORK_CACHE].sort((a, b) => new Date(a.start) - new Date(b.start));
+      return res.json(totalWork);
+    }
+
+    // 3. MASTER COMBINED VIEW - Merges everything together
+    const masterPool = [...localEvents, ...ZOE_CACHE, ...WORK_CACHE, ...SCHOOL_CACHE];
+
+    if (targetView === 'combined') {
+      const sortedCombined = masterPool.sort((a, b) => new Date(a.start) - new Date(b.start));
+      return res.json(sortedCombined);
+    }
+
+    // Fallback filter logic for non-cache tabs like internal kids logs
+    const dynamicSlice = masterPool
+      .filter(event => String(event.calendar).toLowerCase() === String(targetView).toLowerCase())
+      .sort((a, b) => new Date(a.start) - new Date(b.start));
+      
     return res.json(dynamicSlice);
 
   } catch (err) { res.status(500).json({ error: err.message }); }
