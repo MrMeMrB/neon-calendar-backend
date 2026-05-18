@@ -1,7 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import cron from 'node-cron';
 import axios from 'axios';
 import pkg from 'pg';
@@ -12,32 +10,22 @@ const app = express();
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type']
 }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 5001;
-const JWT_SECRET = process.env.JWT_SECRET || "matrix_override_secure_token_99812";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// ZERO INITIAL FAKE FEEDS - Raw streams only
 let ZOE_CACHE = [];
 let WORK_CACHE = [];
 
 async function initDb() {
   try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        username VARCHAR(100) UNIQUE NOT NULL,
-        password VARCHAR(255) NOT NULL
-      );
-    `);
-
     await pool.query(`
       CREATE TABLE IF NOT EXISTS events (
         id SERIAL PRIMARY KEY,
@@ -51,70 +39,33 @@ async function initDb() {
         metric_severity INT DEFAULT 0
       );
     `);
-
-    const userCheck = await pool.query('SELECT * FROM users WHERE username = $1', ['LiamBaker']);
-    if (userCheck.rows.length === 0) {
-      const liamHash = await bcrypt.hash('L1@m19892022', 10);
-      await pool.query('INSERT INTO users (username, password) VALUES ($1, $2)', ['LiamBaker', liamHash]);
-      console.log("✅ Identity [LiamBaker] synced.");
-    }
+    console.log("✅ Database table assertion verified.");
   } catch (err) {
     console.error("❌ DB init failure:", err.message);
   }
 }
 initDb();
 
-// NO FALLBACKS HERE - If the external link is empty or breaks, the cache stays completely empty
 async function syncExternalFeeds() {
   try {
-    const zoeResponse = await axios.get("https://calendar.google.com/calendar/ical/example-zoe/public/basic.ics", { timeout: 6000 });
+    const zoeResponse = await axios.get("https://calendar.google.com/calendar/ical/example-zoe/public/basic.ics", { timeout: 6000 }).catch(() => null);
     if (zoeResponse && zoeResponse.data) {
-      // Direct raw external parsing assignment (Add your ics parsing library call here if needed)
       ZOE_CACHE = []; 
     }
     
-    const workResponse = await axios.get("https://calendar.google.com/calendar/ical/example-work/public/basic.ics", { timeout: 6000 });
+    const workResponse = await axios.get("https://calendar.google.com/calendar/ical/example-work/public/basic.ics", { timeout: 6000 }).catch(() => null);
     if (workResponse && workResponse.data) {
       WORK_CACHE = [];
     }
   } catch (err) {
-    console.log("ℹ️ No live network stream response received. No mock data injected.");
+    console.log("ℹ️ External network link empty or unreachable.");
   }
 }
 cron.schedule('*/30 * * * *', syncExternalFeeds);
 syncExternalFeeds();
 
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ error: "Token missing." });
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: "Token expired." });
-    req.user = user;
-    next();
-  });
-}
-
-app.post('/api/auth/login', async (req, res) => {
-  const { username, password } = req.body;
-  try {
-    const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-    if (result.rows.length === 0) return res.status(400).json({ error: "User not found." });
-
-    const user = result.rows[0];
-    const passwordMatch = await bcrypt.compare(password, user.password);
-    if (!passwordMatch) return res.status(400).json({ error: "Wrong password." });
-
-    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
-    return res.json({ token, user: { name: user.username } });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// PURE DIRECT DATA FEED ROUTING
-app.get('/api/events', authenticateToken, async (req, res) => {
+// OPEN FEED ROUTING - NO AUTH REQUIREMENT
+app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
     const dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
@@ -135,12 +86,10 @@ app.get('/api/events', authenticateToken, async (req, res) => {
       return res.json([...localEvents, ...ZOE_CACHE, ...WORK_CACHE]);
     }
     if (targetView === 'zoe') {
-      const zoeLocalOnly = localEvents.filter(e => e.calendar === 'zoe');
-      return res.json([...zoeLocalOnly, ...ZOE_CACHE]);
+      return res.json([...localEvents.filter(e => e.calendar === 'zoe'), ...ZOE_CACHE]);
     }
     if (targetView === 'work') {
-      const workLocalOnly = localEvents.filter(e => e.calendar === 'work');
-      return res.json([...workLocalOnly, ...WORK_CACHE]);
+      return res.json([...localEvents.filter(e => e.calendar === 'work'), ...WORK_CACHE]);
     }
     
     return res.json(localEvents.filter(e => e.calendar === targetView));
@@ -149,7 +98,7 @@ app.get('/api/events', authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/api/events', authenticateToken, async (req, res) => {
+app.post('/api/events', async (req, res) => {
   const { title, start, end, description, calendar, metricSentiment, metricLocation, metricSeverity } = req.body;
   try {
     const insertQuery = `
@@ -171,7 +120,7 @@ app.post('/api/events', authenticateToken, async (req, res) => {
   }
 });
 
-app.delete('/api/events/:id', authenticateToken, async (req, res) => {
+app.delete('/api/events/:id', async (req, res) => {
   try {
     const targetId = parseInt(req.params.id, 10);
     const destructionResult = await pool.query('DELETE FROM events WHERE id = $1', [targetId]);
@@ -182,4 +131,4 @@ app.delete('/api/events/:id', authenticateToken, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`🚀 Clean Live Backend running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Open API Backend active on port ${PORT}`));
