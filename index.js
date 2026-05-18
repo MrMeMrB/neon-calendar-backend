@@ -241,7 +241,7 @@ app.get('/api/events', authenticateToken, async (req, res) => {
       metricSentiment: row.metric_sentiment, metricLocation: row.metric_location, metricSeverity: row.metric_severity
     }));
 
-    // MASTER ENGINE DISPATCH JOINER
+    // FIXED ISOLATION ROUTING MATRIX: Append the cached feeds conditionally based on target view
     if (targetView === 'combined') {
       return res.json([...localEvents, ...ZOE_CACHE, ...WORK_CACHE, ...SCHOOL_CACHE]);
     }
