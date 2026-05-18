@@ -5,7 +5,6 @@ import multer from 'multer';
 
 const { Pool } = pkg;
 
-// Setup file ingestion for images
 const storage = multer.memoryStorage();
 const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB Limit max
 
@@ -72,7 +71,9 @@ bootstrapDatabaseStructure();
 // Pull Master Sorted Event Vector Streams
 app.get('/api/events', async (req, res) => {
   const { calendar } = req.query;
-  let query = 'SELECT id, title, start_time as start, end_time as end, description, calendar, is_unverified as "isUnverified", is_external as "isExternal", sentiment FROM events';
+  
+  // Kept query columns clean and safe for the ORDER BY clause
+  let query = 'SELECT id, title, start_time, end_time, description, calendar, is_unverified, is_external, sentiment FROM events';
   let params = [];
 
   if (calendar && calendar !== 'combined') {
@@ -84,11 +85,20 @@ app.get('/api/events', async (req, res) => {
 
   try {
     const result = await pool.query(query, params);
+    
+    // Explicitly mapping database keys to FullCalendar properties
     const processed = result.rows.map(r => ({
-      ...r,
-      isUnverified: !!r.isUnverified,
-      isExternal: !!r.isExternal
+      id: r.id,
+      title: r.title,
+      start: r.start_time,
+      end: r.end_time || null,
+      description: r.description || "",
+      calendar: r.calendar,
+      isUnverified: r.is_unverified === 1 || !!r.is_unverified,
+      isExternal: r.is_external === 1 || !!r.is_external,
+      sentiment: r.sentiment || 'neutral'
     }));
+    
     res.json(processed);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -101,7 +111,10 @@ app.post('/api/events', async (req, res) => {
   const targetCal = calendar || 'combined';
   const targetSentiment = sentiment || 'neutral';
 
-  const query = `INSERT INTO events (title, start_time, end_time, description, calendar, is_unverified, is_external, sentiment) VALUES ($1, $2, $3, $4, $5, 0, 0, $6) RETURNING id`;
+  const query = `
+    INSERT INTO events (title, start_time, end_time, description, calendar, is_unverified, is_external, sentiment) 
+    VALUES ($1, $2, $3, $4, $5, 0, 0, $6) RETURNING id
+  `;
   
   try {
     const result = await pool.query(query, [title, start, end || null, description || "", targetCal, targetSentiment]);
@@ -114,7 +127,6 @@ app.post('/api/events', async (req, res) => {
 /* ==========================================
    2. SEAMLESS REPLICATING CLONE ENGINE
    ========================================== */
-
 app.post('/api/events/route-clone', async (req, res) => {
   const { title, start, end, description, targetCalendar, isExternal } = req.body;
   if (!title || !start || !targetCalendar) {
@@ -137,7 +149,6 @@ app.post('/api/events/route-clone', async (req, res) => {
 /* ==========================================
    3. VERIFICATION AND FEEDBACK LEARNING ENDPOINTS
    ========================================== */
-
 app.post('/api/events/learn', async (req, res) => {
   const { eventId, status } = req.body;
   if (!eventId) return res.status(400).json({ error: "Target structural context undefined." });
@@ -160,7 +171,6 @@ app.post('/api/events/learn', async (req, res) => {
 /* ==========================================
    4. INTERACTIVE EXAMPLES & ANNOTATIONS
    ========================================== */
-
 app.get('/api/events/:id/notes', async (req, res) => {
   try {
     const result = await pool.query("SELECT notes FROM event_notes WHERE event_id = $1", [req.params.id]);
@@ -210,7 +220,6 @@ app.post('/api/general-notes', async (req, res) => {
 /* ==========================================
    5. ZERO-WASTE TEXT EXTRACTION ENGINE (OCR / AI)
    ========================================== */
-
 app.post('/api/extract-text', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No image payload asset presented to router input." });
@@ -225,7 +234,6 @@ app.post('/api/extract-text', upload.single('image'), async (req, res) => {
 /* ==========================================
    6. DYNAMIC AUTOMATED PDF COMPILE ENGINE
    ========================================== */
-
 app.get('/api/events/export-pdf', async (req, res) => {
   const { calendar } = req.query;
   let query = "SELECT title, start_time as start, description, calendar, sentiment FROM events";
