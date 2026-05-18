@@ -1,30 +1,10 @@
-import { execSync } from 'child_process';
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-
-// --- 1. GUARANTEED CONTAINER INSTALLATION ---
-try {
-  require.resolve('pdf-lib');
-} catch (e) {
-  console.log('🚨 pdf-lib missing from container environment. Forcing installation...');
-  try {
-    execSync('npm install pdf-lib', { stdio: 'inherit' });
-    console.log('✅ Emergency installation of pdf-lib completed.');
-  } catch (err) {
-    console.error('❌ Emergency installation failed:', err.message);
-  }
-}
-
-// --- 2. STATIC IMPORTS FOR COMPATIBILITY ---
 import express from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import cron from 'node-cron';
 import axios from 'axios';
-
-// Dynamically pull pdf-lib elements so it doesn't break the build tree evaluation
-const { PDFDocument, rgb } = require('pdf-lib');
+import { PDFDocument, rgb } from 'pdf-lib';
 
 const app = express();
 app.use(cors());
@@ -175,7 +155,6 @@ app.get('/api/reports/pdf', authenticateToken, async (req, res) => {
   }
 });
 
-// --- KEEP-ALIVE BIND ROUTINE ---
 app.listen(PORT, () => {
   console.log(`🚀 Core Secure Matrix Stack listening safely on port ${PORT}`);
 });
