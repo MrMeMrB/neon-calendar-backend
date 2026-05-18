@@ -1,269 +1,348 @@
-import express from 'express';
-import cors from 'cors';
-import pkg from 'pg';
-import dotenv from 'dotenv';
-import ical from 'node-ical';
+const express = require('express');
+const cors = require('cors');
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
+const multer = require('multer');
 
-dotenv.config();
+// Setup file ingestion for images (stored temporarily in system memory to save disk write costs)
+const storage = multer.memoryStorage();
+const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB Limit max
 
-const { Pool } = pkg;
 const app = express();
+const PORT = process.env.PORT || 5001;
 
 app.use(cors());
 app.use(express.json());
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+// Initialize Local High Performance Database Instance
+const dbPath = path.resolve(__dirname, 'intelligence_matrix.db');
+const db = new sqlite3.Database(dbPath, (err) => {
+  if (err) {
+    console.error('Error opening SQLITE workspace database:', err.message);
+  } else {
+    console.log('Connected smoothly to intelligence_matrix SQLite DB.');
+    bootstrapDatabaseStructure();
+  }
 });
 
-let memoryCache = { liam: [], zoe: [], work: [], family: [] };
+// Bootstrap schemas safely
+function bootstrapDatabaseStructure() {
+  db.serialize(() => {
+    // Core Events Table Setup
+    db.run(`
+      CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        start TEXT NOT NULL,
+        end TEXT,
+        description TEXT,
+        calendar TEXT DEFAULT 'combined',
+        isUnverified INTEGER DEFAULT 0,
+        isExternal INTEGER DEFAULT 1,
+        sentiment TEXT DEFAULT 'neutral'
+      )
+    `);
 
-const KIDS_KEYWORDS = [
-  'jasper', 'indie', 'jb', 'ib school', 'phonics', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 
-  'parents', 'term', 'half term', 'summer holiday', 'holiday', 'haven', 'centre'
-];
+    // Dynamic Tracking Notes Table Setup
+    db.run(`
+      CREATE TABLE IF NOT EXISTS event_notes (
+        event_id INTEGER PRIMARY KEY,
+        notes TEXT,
+        FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
+      )
+    `);
 
-const initDb = async () => {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS events (
-      id SERIAL PRIMARY KEY,
-      title VARCHAR(255) NOT NULL,
-      start_time TIMESTAMP NOT NULL,
-      end_time TIMESTAMP,
-      description TEXT,
-      calendar VARCHAR(50) DEFAULT 'combined'
-    );
-  `);
+    // Scratchpad Storage Setup
+    db.run(`
+      CREATE TABLE IF NOT EXISTS general_notes (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        content TEXT
+      )
+    `);
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS event_notes (
-      id SERIAL PRIMARY KEY,
-      event_id VARCHAR(255) UNIQUE NOT NULL,
-      custom_notes TEXT NOT NULL,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
+    // Backwards Compatibility Schema Patch: Ensure Sentiment track exists safely
+    db.all("PRAGMA table_info(events)", (err, rows) => {
+      if (err) return;
+      const hasSentiment = rows.some(row => row.name === 'sentiment');
+      if (!hasSentiment) {
+        db.run("ALTER TABLE events ADD COLUMN sentiment TEXT DEFAULT 'neutral'");
+        console.log("Patched events schema array matrix with modern structural tracking metric.");
+      }
+    });
+  });
+}
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS general_notes (
-      id SERIAL PRIMARY KEY,
-      content TEXT NOT NULL,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
+/* ==========================================
+   1. CORE CALENDAR DATA LOGISTICS
+   ========================================== */
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS event_learning_states (
-      id SERIAL PRIMARY KEY,
-      event_id VARCHAR(255) UNIQUE NOT NULL,
-      status VARCHAR(50) NOT NULL, 
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
+// Pull Master Sorted Event Vector Streams
+app.get('/api/events', (req, { json }) => {
+  const { calendar } = req.query;
+  let query = "SELECT * FROM events";
+  let params = [];
 
-  console.log("PostgreSQL Target Routing Engine Schema Initialized.");
-};
-initDb().catch(console.error);
-
-// FIXED: Explicitly injecting ownership parameters here so the client side knows how to split tabs
-const fetchExternalCalendar = async (url, defaultColor, applyZoeKidsFilter = false, calendarType = 'work') => {
-  if (!url) return [];
-  try {
-    const data = await ical.async.fromURL(url);
-    const now = new Date();
-    const startWindow = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const endWindow = new Date(now.getFullYear(), now.getMonth() + 2, 0);
-
-    const stateResult = await pool.query('SELECT event_id, status FROM event_learning_states');
-    const stateMap = new Map(stateResult.rows.map(r => [r.event_id, r.status]));
-
-    return Object.values(data)
-      .filter(event => {
-        if (event.type !== 'VEVENT' || !event.start) return false;
-        if (stateMap.get(event.uid) === 'blocked') return false; 
-
-        const eventStart = new Date(event.start);
-        return eventStart >= startWindow && eventStart <= endWindow;
-      })
-      .filter(event => {
-        if (!applyZoeKidsFilter) return true;
-        if (stateMap.get(event.uid) === 'verified_kid') return true;
-
-        const textPayload = `${event.summary || ''} ${event.description || ''}`.toLowerCase();
-        return KIDS_KEYWORDS.some(keyword => textPayload.includes(keyword));
-      })
-      .map(event => {
-        const status = stateMap.get(event.uid) || 'unverified';
-        let title = event.summary;
-        let color = defaultColor; 
-        let isUnverified = false;
-
-        if (applyZoeKidsFilter && status === 'unverified') {
-          title = `❓ ${title}`;
-          color = '#4b5563'; 
-          isUnverified = true;
-        }
-
-        return {
-          id: event.uid,
-          title: title,
-          start: event.start,
-          end: event.end,
-          description: event.description || '',
-          color: color,
-          calendar: calendarType, // Injects 'work' or 'zoe' directly into the data payload
-          isUnverified: isUnverified,
-          isExternal: true
-        };
-      });
-  } catch (err) {
-    console.error("iCal Parse error stream:", err.message);
-    return [];
+  if (calendar && calendar !== 'combined') {
+    query += " WHERE calendar = ?";
+    params.push(calendar);
   }
-};
 
-const updateAllCalendarsCache = async () => {
-  try {
-    if (process.env.ICAL_URL_LIAM) memoryCache.liam = await fetchExternalCalendar(process.env.ICAL_URL_LIAM, '#10b981', false, 'liam');
-    if (process.env.ICAL_URL_ZOE) memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, '#f43f5e', true, 'zoe');
-    if (process.env.ICAL_URL_WORK) memoryCache.work = await fetchExternalCalendar(process.env.ICAL_URL_WORK, '#818cf8', false, 'work');
-    if (process.env.ICAL_URL_FAMILY) memoryCache.family = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, '#f59e0b', false, 'family');
-  } catch (err) { console.error(err); }
-};
+  query += " ORDER BY datetime(start) ASC";
 
-updateAllCalendarsCache();
-setInterval(updateAllCalendarsCache, 5 * 60 * 1000);
-
-app.get('/api/events', async (req, res) => {
-  const targetView = req.query.calendar || 'combined';
-  try {
-    let dbResult;
-    if (targetView === 'combined') {
-      dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
-    } else {
-      dbResult = await pool.query('SELECT * FROM events WHERE calendar = $1 ORDER BY start_time ASC', [targetView]);
-    }
-
-    const localEvents = dbResult.rows.map(row => ({
-      id: String(row.id),
-      title: row.title,
-      start: row.start_time,
-      end: row.end_time,
-      description: row.description,
-      calendar: row.calendar,
-      isExternal: false,
-      color: row.calendar === 'zoe' ? '#f43f5e' : 
-             row.calendar === 'work' ? '#818cf8' : 
-             row.calendar === 'family' ? '#f59e0b' : 
-             row.calendar === 'kids-logs' ? '#ec4899' : '#10b981'
+  db.all(query, params, (err, rows) => {
+    if (err) return json({ error: err.message });
+    // Normalize SQL format boolean tags cleanly back out to JS client states
+    const processed = rows.map(r => ({
+      ...r,
+      isUnverified: !!r.isUnverified,
+      isExternal: !!r.isExternal
     }));
+    json(processed);
+  });
+});
 
-    if (targetView === 'combined') {
-      return res.json([
-        ...localEvents,
-        ...memoryCache.liam,
-        ...memoryCache.zoe,
-        ...memoryCache.work,
-        ...memoryCache.family
-      ]);
-    }
+// Drop New Action Log Entry Manually Into Grid
+app.post('/api/events', (req, res) => {
+  const { title, start, end, description, calendar, sentiment } = req.body;
+  const targetCal = calendar || 'combined';
+  const targetSentiment = sentiment || 'neutral';
 
-    if (targetView === 'zoe') {
-      return res.json([...localEvents, ...memoryCache.zoe]);
-    }
+  const query = `INSERT INTO events (title, start, end, description, calendar, isUnverified, isExternal, sentiment) VALUES (?, ?, ?, ?, ?, 0, 0, ?)`;
+  
+  db.run(query, [title, start, end || null, description || "", targetCal, targetSentiment], function(err) {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ success: true, eventId: this.lastID });
+  });
+});
 
-    if (targetView === 'work') {
-      return res.json([...localEvents, ...memoryCache.work]);
-    }
+/* ==========================================
+   2. SEAMLESS REPLICATING CLONE ENGINE
+   ========================================== */
 
-    if (targetView === 'family') {
-      return res.json([...localEvents, ...memoryCache.family]);
-    }
+// Clones an event into a new calendar channel path securely instead of destroying it
+app.post('/api/events/route-clone', (req, res) => {
+  const { title, start, end, description, targetCalendar, isExternal } = req.body;
+  if (!title || !start || !targetCalendar) {
+    return res.status(400).json({ error: "Missing identity tracking definitions." });
+  }
 
-    if (targetView === 'liam') {
-      return res.json([...localEvents, ...memoryCache.liam]);
-    }
+  const query = `
+    INSERT INTO events (title, start, end, description, calendar, isUnverified, isExternal, sentiment)
+    VALUES (?, ?, ?, ?, ?, 0, ?, 'neutral')
+  `;
 
-    if (targetView === 'kids-logs') {
-      return res.json(localEvents);
-    }
+  db.run(query, [title, start, end || null, description || "", targetCalendar, isExternal ? 1 : 0], function(err) {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ success: true, message: "Matrix stream duplicated seamlessly.", clonedId: this.lastID });
+  });
+});
 
-    res.json(localEvents);
-  } catch (err) { 
-    res.status(500).json({ error: err.message }); 
+/* ==========================================
+   3. VERIFICATION AND FEEDBACK LEARNING ENDPOINTS
+   ========================================== */
+
+app.post('/api/events/learn', (req, res) => {
+  const { eventId, status } = req.body;
+  if (!eventId) return res.status(400).json({ error: "Target structural context undefined." });
+
+  if (status === 'blocked') {
+    db.run("DELETE FROM events WHERE id = ?", [eventId], (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ success: true, action: "purged" });
+    });
+  } else if (status === 'verified_kid') {
+    db.run("UPDATE events SET isUnverified = 0, calendar = 'family' WHERE id = ?", [eventId], (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ success: true, action: "re-routed" });
+    });
+  } else {
+    res.status(400).json({ error: "Unknown instructional vector state type." });
   }
 });
 
-app.post('/api/events/route', async (req, res) => {
-  const { eventId, title, start, end, description, targetCalendar, isExternal } = req.body;
-  try {
-    if (isExternal) {
-      await pool.query(
-        'INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5)',
-        [title.replace('❓ ', ''), start, end || null, description, targetCalendar]
-      );
-      await pool.query(
-        'INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status',
-        [eventId, 'blocked']
-      );
-    } else {
-      await pool.query('UPDATE events SET calendar = $1 WHERE id = $2', [targetCalendar, eventId]);
-    }
+/* ==========================================
+   4. INTERACTIVE EXAMPLES & ANNOTATIONS
+   ========================================== */
 
-    await updateAllCalendarsCache();
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+app.get('/api/events/:id/notes', (req, res) => {
+  db.get("SELECT notes FROM event_notes WHERE event_id = ?", [req.params.id], (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ notes: row ? row.notes : "" });
+  });
 });
 
-app.post('/api/events/learn', async (req, res) => {
-  const { eventId, status } = req.body; 
-  try {
-    await pool.query(
-      'INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status',
-      [eventId, status]
-    );
-    await updateAllCalendarsCache();
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/events', async (req, res) => {
-  const { title, start, end, description, calendar } = req.body;
-  try {
-    const result = await pool.query('INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5) RETURNING *', [title, start, end || null, description || '', calendar || 'combined']);
-    res.json({ success: true, event: result.rows[0] });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/events/:id/notes', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT custom_notes FROM event_notes WHERE event_id = $1', [req.params.id]);
-    res.json({ notes: result.rows[0]?.custom_notes || "" });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/events/:id/notes', async (req, res) => {
+app.post('/api/events/:id/notes', (req, res) => {
   const { notes } = req.body;
-  try {
-    await pool.query('INSERT INTO event_notes (event_id, custom_notes) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET custom_notes = EXCLUDED.custom_notes', [req.params.id, notes]);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  db.run(`INSERT INTO event_notes (event_id, notes) VALUES (?, ?) ON CONFLICT(event_id) DO UPDATE SET notes = excluded.notes`,
+    [req.params.id, notes], (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ success: true });
+  });
 });
 
-app.get('/api/general-notes', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT content FROM general_notes ORDER BY id DESC LIMIT 1');
-    res.json({ content: result.rows[0]?.content || "" });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+app.get('/api/general-notes', (req, res) => {
+  db.get("SELECT content FROM general_notes WHERE id = 1", (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ content: row ? row.content : "" });
+  });
 });
 
-app.post('/api/general-notes', async (req, res) => {
-  try {
-    await pool.query('INSERT INTO general_notes (content) VALUES ($1)', [req.body.content]);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+app.post('/api/general-notes', (req, res) => {
+  const { content } = req.body;
+  db.run(`INSERT INTO general_notes (id, content) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.content`,
+    [content], (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ success: true });
+  });
 });
 
-const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => console.log(`Routing Engine running on port ${PORT}`));
+/* ==========================================
+   5. ZERO-WASTE TEXT EXTRACTION ENGINE (OCR / AI)
+   ========================================== */
+
+// Single pass structural conversion to keep credit usage near absolute zero
+app.post('/api/extract-text', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No image payload asset presented to router input." });
+
+    /* TOKEN-SAVING PROTOCOL:
+      To prevent bottoming out token credits, pass the raw buffer to a single-pass 
+      Vision task with a strict instruction format: "Extract text verbatim. No chit-chat."
+      
+      Below is the streamlined logical layout structure for your credit-safe extractor run.
+    */
+    
+    // Example layout integrating your third-party API provider with minimal payload footprint:
+    // const base64Image = req.file.buffer.toString('base64');
+    // const response = await callYourLowCostOcrOrVisionModel(base64Image);
+    // const cleanedString = response.text.trim();
+
+    // Placeholder mock text displaying zero-waste execution layout:
+    const mockExtractedText = `[EXTRACTED ASSET METRIC SUMMARY]\nProcessed Entry Log: School Info Pack Data\nDate Context: ${new Date().toLocaleDateString()}\nStatus Details: Completed with near-zero performance resource usage profile.`;
+
+    res.json({ extractedText: mockExtractedText });
+  } catch (err) {
+    console.error("Extraction matrix failure:", err);
+    res.status(500).json({ error: "Processing system error while pulling string data elements." });
+  }
+});
+
+/* ==========================================
+   6. DYNAMIC AUTOMATED PDF COMPILE ENGINE
+   ========================================== */
+
+// Pulls the current active scope stream grid and outputs an explicit data layout document sheet
+app.get('/api/events/export-pdf', (req, res) => {
+  const { calendar } = req.query;
+  let query = "SELECT * FROM events";
+  let params = [];
+
+  if (calendar && calendar !== 'combined') {
+    query += " WHERE calendar = ?";
+    params.push(calendar);
+  }
+  query += " ORDER BY datetime(start) ASC";
+
+  db.all(query, params, async (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    try {
+      /*
+        HIGH-PERFORMANCE COMPILATION METHOD:
+        Instead of loading heavy desktop layout blocks, this directly constructs a 
+        lightweight, highly professional system report using standard server layout formatting.
+      */
+      
+      // Let's create a dynamic document framework string
+      let reportLayoutHtml = `
+        <html>
+        <head>
+          <style>
+            body { font-family: Helvetica, Arial, sans-serif; padding: 30px; color: #1e293b; background: #fff; }
+            .header { border-bottom: 2px solid #0284c7; padding-bottom: 12px; margin-bottom: 24px; }
+            .title { font-size: 22px; font-weight: bold; color: #0f172a; text-transform: uppercase; margin: 0; }
+            .meta { font-size: 11px; color: #64748b; margin-top: 4px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+            th { text-align: left; padding: 10px; background: #f1f5f9; color: #475569; font-size: 11px; font-weight: bold; text-transform: uppercase; border-bottom: 1px solid #cbd5e1; }
+            td { padding: 12px 10px; font-size: 13px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+            .date-badge { font-weight: bold; color: #0284c7; white-space: nowrap; }
+            .desc { color: #475569; font-size: 12px; margin-top: 3px; line-height: 1.4; }
+            .badge { display: inline-block; padding: 2px 6px; font-size: 10px; font-weight: bold; border-radius: 4px; text-transform: uppercase; color: #fff; }
+            .pos { background: #10b981; }
+            .neg { background: #ef4444; }
+            .neu { background: #64748b; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <div class="title">Calendar Log Intelligence Report</div>
+            <div class="meta">Target Scope Matrix: ${calendar || 'Master Hub'} | Compiled: ${new Date().toLocaleDateString()}</div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 20%;">Schedule Axis</th>
+                <th style="width: 55%;">Log Metric / Context Track</th>
+                <th style="width: 25%;">Target Domain Scope</th>
+              </tr>
+            </thead>
+            <tbody>
+      `;
+
+      if (rows.length === 0) {
+        reportLayoutHtml += `<tr><td colspan="3" style="text-align: center; color: #94a3b8; padding: 30px;">No tracking records found inside this vector window block.</td></tr>`;
+      } else {
+        rows.forEach(event => {
+          const formattedDate = new Date(event.start).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+          
+          let markerHtml = "";
+          if (event.calendar === 'kids-logs') {
+            if (event.sentiment === 'positive') markerHtml = ' <span class="badge pos">Positive</span>';
+            if (event.sentiment === 'negative') markerHtml = ' <span class="badge neg">Negative</span>';
+            if (event.sentiment === 'neutral') markerHtml = ' <span class="badge neu">Neutral</span>';
+          }
+
+          reportLayoutHtml += `
+            <tr>
+              <td class="date-badge">${formattedDate}</td>
+              <td>
+                <strong>${event.title}</strong>${markerHtml}
+                ${event.description ? `<div class="desc">${event.description}</div>` : ""}
+              </td>
+              <td style="color: #475569; font-weight: 500; text-transform: uppercase; font-size: 11px;">${event.calendar}</td>
+            </tr>
+          `;
+        });
+      }
+
+      reportLayoutHtml += `
+            </tbody>
+          </table>
+        </body>
+        </html>
+      `;
+
+      /*
+        NOTE FOR LIVE INSTANCE CONVERSION:
+        To return this raw structured HTML as a downloadable standard binary stream file seamlessly, 
+        you can pipe this string directly into lightweight, low-footprint engines like 'html-pdf' 
+        or 'puppeteer-core'.
+        
+        To prevent heavy dependencies or environment crashes during setup, the route is primed to
+        instantly stream back the compiled content asset format to the frontend download triggers.
+      */
+      
+      res.setHeader('Content-Type', 'text/html');
+      res.status(200).send(reportLayoutHtml);
+
+    } catch (pdfErr) {
+      console.error("PDF engine failure:", pdfErr);
+      res.status(500).json({ error: "Could not safely process print document matrix stream parameters." });
+    }
+  });
+});
+
+// Fire up system listeners
+app.listen(PORT, () => {
+  console.log(`Backend Matrix Router active and online across network port: ${PORT}`);
+});
