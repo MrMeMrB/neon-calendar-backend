@@ -160,7 +160,7 @@ const syncSchoolFeed = async () => {
         start: new Date(e.start).toISOString(),
         end: e.end ? new Date(e.end).toISOString() : null,
         description: e.description || '',
-        calendar: 'school', // Fixed identifier fallback logic
+        calendar: 'school', 
         color: '#0284c7',
         isExternal: true,
         originCalendar: 'school'
@@ -224,13 +224,39 @@ app.delete('/api/admin/users/:id', authenticateToken, requireAdmin, async (req, 
 app.get('/api/events', authenticateToken, async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
+    // 1. DIRECT OVERRIDES FOR EXTERNAL LIVE STREAM CACHES
+    if (targetView === 'zoe') {
+      const dbResult = await pool.query('SELECT * FROM events WHERE calendar = $1 ORDER BY start_time ASC', ['zoe']);
+      const localEvents = dbResult.rows.map(row => ({
+        id: String(row.id), title: row.title, start: new Date(row.start_time).toISOString(), end: row.end_time ? new Date(row.end_time).toISOString() : null,
+        description: row.description || '', calendar: 'zoe', isExternal: false, color: '#f43f5e'
+      }));
+      return res.json([...localEvents, ...ZOE_CACHE]);
+    }
+
+    if (targetView === 'work') {
+      const dbResult = await pool.query('SELECT * FROM events WHERE calendar = $1 ORDER BY start_time ASC', ['work']);
+      const localEvents = dbResult.rows.map(row => ({
+        id: String(row.id), title: row.title, start: new Date(row.start_time).toISOString(), end: row.end_time ? new Date(row.end_time).toISOString() : null,
+        description: row.description || '', calendar: 'work', isExternal: false, color: '#818cf8'
+      }));
+      return res.json([...localEvents, ...WORK_CACHE]);
+    }
+
+    if (targetView === 'school' || targetView === 'public-gcal') {
+      const dbResult = await pool.query('SELECT * FROM events WHERE calendar IN ($1, $2) ORDER BY start_time ASC', ['school', 'public-gcal']);
+      const localEvents = dbResult.rows.map(row => ({
+        id: String(row.id), title: row.title, start: new Date(row.start_time).toISOString(), end: row.end_time ? new Date(row.end_time).toISOString() : null,
+        description: row.description || '', calendar: 'school', isExternal: false, color: '#0284c7'
+      }));
+      return res.json([...localEvents, ...SCHOOL_CACHE]);
+    }
+
+    // 2. BACKUP LOCAL INTERNAL DATABASE CHECKS (liam-life, kids-logs, combined)
     let dbResult;
-    
-    // Pull correct layer entries from database matching frontend view context
     if (targetView === 'combined') {
       dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
     } else {
-      // Handles queries matching 'zoe', 'work', 'school', 'liam-life', or 'kids-logs'
       dbResult = await pool.query('SELECT * FROM events WHERE calendar = $1 ORDER BY start_time ASC', [targetView]);
     }
 
@@ -242,21 +268,10 @@ app.get('/api/events', authenticateToken, async (req, res) => {
       metricSentiment: row.metric_sentiment, metricLocation: row.metric_location, metricSeverity: row.metric_severity
     }));
 
-    // MASTER UNION ROUTER - Combines database rows with stored runtime iCal feeds
     if (targetView === 'combined') {
       return res.json([...localEvents, ...ZOE_CACHE, ...WORK_CACHE, ...SCHOOL_CACHE]);
     }
-    if (targetView === 'zoe') {
-      return res.json([...localEvents, ...ZOE_CACHE]);
-    }
-    if (targetView === 'work') {
-      return res.json([...localEvents, ...WORK_CACHE]);
-    }
-    if (targetView === 'school' || targetView === 'public-gcal') {
-      return res.json([...localEvents, ...SCHOOL_CACHE]);
-    }
     
-    // Fallback for custom purely internal sheets like liam-life and kids-logs
     return res.json(localEvents);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
