@@ -17,7 +17,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Walled-off, completely independent cache arrays
+// Explicitly separate our cache arrays globally
 let ZOE_CACHE = [];
 let WORK_CACHE = [];
 
@@ -44,16 +44,18 @@ const initDb = async () => {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
-  console.log("Database initialized.");
+  console.log("Database initialized successfully.");
 };
 initDb().catch(console.error);
 
-// 1. STRIKT ZOE PARSER (Google Calendar Feed)
 const syncZoeFeed = async () => {
-  if (!process.env.ICAL_URL_ZOE) return;
+  if (!process.env.ICAL_URL_ZOE) {
+    console.log("Zoe URL missing from environment variables.");
+    return;
+  }
   try {
     const data = await ical.async.fromURL(process.env.ICAL_URL_ZOE, {
-      headers: { 'User-Agent': 'Mozilla' }
+      headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     
     const now = new Date();
@@ -79,18 +81,20 @@ const syncZoeFeed = async () => {
         calendar: 'zoe',
         isExternal: true
       }));
-    console.log(`Zoe Cache reloaded. Total: ${ZOE_CACHE.length}`);
+    console.log(`Zoe Cache updated successfully: ${ZOE_CACHE.length} items.`);
   } catch (err) {
-    console.error("Zoe sync failed:", err.message);
+    console.error("Zoe sync encountered an error:", err.message);
   }
 };
 
-// 2. STRIKT WORK PARSER (Outlook Calendar Feed)
 const syncWorkFeed = async () => {
-  if (!process.env.ICAL_URL_WORK) return;
+  if (!process.env.ICAL_URL_WORK) {
+    console.log("Work URL missing from environment variables.");
+    return;
+  }
   try {
     const data = await ical.async.fromURL(process.env.ICAL_URL_WORK, {
-      headers: { 'User-Agent': 'Mozilla' }
+      headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     
     const now = new Date();
@@ -122,24 +126,27 @@ const syncWorkFeed = async () => {
           isExternal: true
         };
       });
-    console.log(`Work Cache reloaded. Total: ${WORK_CACHE.length}`);
+    console.log(`Work Cache updated successfully: ${WORK_CACHE.length} items.`);
   } catch (err) {
-    console.error("Work sync failed:", err.message);
+    console.error("Work sync encountered an error:", err.message);
   }
 };
 
+// CRITICAL FIX: Safe, independent execution wrapper
 const runAllSyncs = async () => {
+  console.log("Starting calendar data sync sequence...");
   await syncZoeFeed();
   await syncWorkFeed();
+  console.log("Calendar sync sequence complete.");
 };
+
+// Run immediately on boot and set interval
 runAllSyncs();
 setInterval(runAllSyncs, 5 * 60 * 1000);
 
-// 3. HARD RE-MAPPING OF THE ROUTING DISPATCHER
 app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
-    // Look up local database configurations
     let dbResult;
     if (targetView === 'combined') {
       dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
@@ -164,22 +171,19 @@ app.get('/api/events', async (req, res) => {
       metricSeverity: row.metric_severity
     }));
 
-    // TARGET ROUTING VERIFICATION LOGIC:
     if (targetView === 'combined') {
       return res.json([...localEvents, ...ZOE_CACHE, ...WORK_CACHE]);
     }
 
     if (targetView === 'zoe') {
-      // ONLY Zoe database items + ONLY Zoe automated stream entries
       return res.json([...localEvents, ...ZOE_CACHE]);
     }
 
     if (targetView === 'work') {
-      // ONLY Work database items + ONLY Work Outlook entries
       return res.json([...localEvents, ...WORK_CACHE]);
     }
 
-    // Liam's Life & Kids Logs view branch: Absolutely 0% external items can bleed here.
+    // Liam's Life and Kids Logs views pull strictly from the local database
     return res.json(localEvents);
 
   } catch (err) { 
@@ -215,7 +219,9 @@ app.post('/api/events/learn', async (req, res) => {
     );
     await runAllSyncs();
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/events', async (req, res) => {
