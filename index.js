@@ -15,28 +15,102 @@ app.use(express.json());
 const PORT = process.env.PORT || 5001; 
 const JWT_SECRET = "matrix_override_secure_token_99812";
 
-// --- RESTORED PERSISTENT DATABASE STORAGE LAYER ---
+// --- DATABASE SIMULATION LAYER (PRE-LOADED WITH YOUR DATA) ---
 let usersDb = [];
-let cachedExternalEvents = []; // Secure cache bucket for cron-fetched school feeds
+let cachedExternalEvents = []; 
 
-// Full restoration of your active calendar items, work logs, and Zoe sync records
+// Full restoration of your active work projects, family logs, and Zoe sync records
 let eventsDb = [
-  // --- WORK OPERATIONS CORRIDOR ---
-  { id: "w1", title: "Ford Dunton: DLX2 Benchmarking Execution", start: "2026-05-12T09:00:00Z", end: "2026-05-12T17:00:00Z", description: "On-site review of Current Clamps and hardware diagnostic benchmarking run.", calendar: "work", domain: "work", color: "#10b981" },
-  { id: "w2", title: "JCB Wardlow Support Session", start: "2026-04-07T10:00:00Z", end: "2026-04-07T15:00:00Z", description: "EMX Daisy-Chaining diagnostic interface configuration patch.", calendar: "work", domain: "work", color: "#10b981" },
-  { id: "w3", title: "Potters Resort Five Lakes Holiday", start: "2026-07-10T09:00:00Z", end: "2026-07-13T17:00:00Z", description: "Full weekend leave booked off (Friday and Monday confirmed).", calendar: "liam-life", domain: "internal", color: "#6366f1" },
-  { id: "w4", title: "September Holiday Block", start: "2026-09-18T09:00:00Z", end: "2026-09-25T12:00:00Z", description: "Autumn leave rotation block.", calendar: "liam-life", domain: "internal", color: "#6366f1" },
+  // --- CORPORATE OPERATIONS (WORK) ---
+  { 
+    id: "w1", 
+    title: "Ford Dunton: DLX2 Benchmarking Execution", 
+    start: "2026-05-12T09:00:00Z", 
+    end: "2026-05-12T17:00:00Z", 
+    description: "On-site review of Current Clamps and hardware diagnostic benchmarking run.", 
+    calendar: "work", 
+    domain: "work", 
+    color: "#10b981" 
+  },
+  { 
+    id: "w2", 
+    title: "JCB Wardlow Support Session", 
+    start: "2026-04-07T10:00:00Z", 
+    end: "2026-04-07T15:00:00Z", 
+    description: "EMX Daisy-Chaining diagnostic interface configuration patch.", 
+    calendar: "work", 
+    domain: "work", 
+    color: "#10b981" 
+  },
+  
+  // --- LIAM'S CORE LIFE & LEAVE MANAGEMENT ---
+  { 
+    id: "w3", 
+    title: "Potters Resort Five Lakes Holiday", 
+    start: "2026-07-10T09:00:00Z", 
+    end: "2026-07-13T17:00:00Z", 
+    description: "Full weekend family leave booked off (Friday and Monday fully confirmed).", 
+    calendar: "liam-life", 
+    domain: "internal", 
+    color: "#6366f1" 
+  },
+  { 
+    id: "w4", 
+    title: "September Holiday Block", 
+    start: "2026-09-18T09:00:00Z", 
+    end: "2026-09-25T12:00:00Z", 
+    description: "Autumn leave rotation block. Out of office.", 
+    calendar: "liam-life", 
+    domain: "internal", 
+    color: "#6366f1" 
+  },
   
   // --- ZOE SHARED MATRIX TIMELINE ---
-  { id: "z1", title: "Zoe Coordination Sync", start: "2026-05-20T18:30:00Z", end: "2026-05-20T21:00:00Z", description: "Household tracking and calendar sequence alignment.", calendar: "zoe", domain: "zoe", color: "#f43f5e" },
-  { id: "z2", title: "Family Shared Dinner Rotation", start: "2026-05-24T17:00:00Z", end: "2026-05-24T20:00:00Z", description: "Weekend dinner block with Zoe and children.", calendar: "zoe", domain: "zoe", color: "#f43f5e" },
+  { 
+    id: "z1", 
+    title: "Zoe Coordination Sync", 
+    start: "2026-05-20T18:30:00Z", 
+    end: "2026-05-20T21:00:00Z", 
+    description: "Household tracking and upcoming calendar sequence alignment.", 
+    calendar: "zoe", 
+    domain: "zoe", 
+    color: "#f43f5e" 
+  },
+  { 
+    id: "z2", 
+    title: "Family Shared Dinner Rotation", 
+    start: "2026-05-24T17:00:00Z", 
+    end: "2026-05-24T20:00:00Z", 
+    description: "Weekend dinner block with Zoe and the kids.", 
+    calendar: "zoe", 
+    domain: "zoe", 
+    color: "#f43f5e" 
+  },
 
-  // --- CHILD SECURITY MONITOR LOGS ---
-  { id: "k1", title: "Indie & Jasper Activity Log", start: "2026-05-19T08:30:00Z", end: "2026-05-19T15:30:00Z", description: "School attendance confirmation frame.", calendar: "kids-logs", domain: "kids-logs", color: "#f97316" },
-  { id: "k2", title: "Jack & George Co-Parenting Handover", start: "2026-05-22T16:00:00Z", end: "2026-05-22T17:00:00Z", description: "Standard custody schedule rotation tracking point.", calendar: "kids-logs", domain: "kids-logs", color: "#f97316" }
+  // --- CHILD TRACKING & MANAGEMENT LOGS ---
+  { 
+    id: "k1", 
+    title: "Indie & Jasper Activity Log", 
+    start: "2026-05-19T08:30:00Z", 
+    end: "2026-05-19T15:30:00Z", 
+    description: "School attendance confirmation frame.", 
+    calendar: "kids-logs", 
+    domain: "kids-logs", 
+    color: "#f97316" 
+  },
+  { 
+    id: "k2", 
+    title: "Jack & George Co-Parenting Handover", 
+    start: "2026-05-22T16:00:00Z", 
+    end: "2026-05-22T17:00:00Z", 
+    description: "Standard custody schedule rotation tracking point.", 
+    calendar: "kids-logs", 
+    domain: "kids-logs", 
+    color: "#f97316" 
+  }
 ];
 
-// Fallback school URL (Replace with your direct active iCal URL string when ready)
+// Fallback school URL (Replace with your direct active public iCal link when ready)
 const PUBLIC_SCHOOL_CALENDAR_URL = "https://calendar.google.com/calendar/ical/example/public/basic.ics";
 
 if (usersDb.length === 0) {
@@ -49,7 +123,7 @@ if (usersDb.length === 0) {
 }
 
 /**
- * Advanced Normalization Protocol: Intercepts and formats all feed records cleanly
+ * Normalization Protocol: Intercepts raw inputs and guarantees uniform data shapes
  */
 function normalizeEvent(raw, sourceCategory) {
   const cleanCategory = String(sourceCategory || 'liam-life').toLowerCase().trim();
@@ -141,7 +215,7 @@ app.delete('/api/events/:id', authenticateToken, (req, res) => {
   res.json({ success: true, message: "Entry expunged from system local storage." });
 });
 
-// --- COMPATIBLE REQ-BASED PDF EXPORT ENGINE ---
+// --- SAFE RUNTIME PDF LOG REPORT GENERATOR ---
 app.get('/api/reports/pdf', authenticateToken, async (req, res) => {
   try {
     const { PDFDocument, rgb } = require('pdf-lib');
