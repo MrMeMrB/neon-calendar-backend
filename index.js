@@ -23,6 +23,7 @@ const pool = new Pool({
 
 let ZOE_CACHE = [];
 let WORK_CACHE = [];
+let SCHOOL_CACHE = [];
 
 // Automated DB Initialization & Seed Script
 const initDb = async () => {
@@ -141,7 +142,40 @@ const syncWorkFeed = async () => {
   } catch (err) { console.error("Work iCal Sync Failure:", err.message); }
 };
 
-const runAllSyncs = async () => { await syncZoeFeed(); await syncWorkFeed(); };
+// BACKEND NATIVE RECOVERY FOR ABINGTON SCHOOL SYSTEM GOOGLE CALENDAR
+const syncSchoolFeed = async () => {
+  try {
+    const schoolUrl = "https://calendar.google.com/calendar/ical/c_ca05bb6f1b85733a8038889ae52245021dcf5f1253116eb7c88dd45745fa5965%40group.calendar.google.com/public/basic.ics";
+    const data = await ical.async.fromURL(schoolUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const now = new Date();
+    const startWindow = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+    const endWindow = new Date(now.getFullYear(), now.getMonth() + 4, 0);
+
+    SCHOOL_CACHE = Object.values(data)
+      .filter(e => e.type === 'VEVENT' && e.start)
+      .filter(e => { const s = new Date(e.start); return s >= startWindow && s <= endWindow; })
+      .map(e => ({
+        id: e.uid || Math.random().toString(36).substr(2, 9),
+        title: e.summary || 'School Event',
+        start: new Date(e.start).toISOString(),
+        end: e.end ? new Date(e.end).toISOString() : null,
+        description: e.description || '',
+        calendar: 'public-gcal',
+        color: '#0284c7',
+        isExternal: true,
+        originCalendar: 'public-gcal'
+      }));
+    console.log(`Abington School GCal Cached Natively: ${SCHOOL_CACHE.length} items.`);
+  } catch (err) {
+    console.error("Abington School Stream Parse Failure:", err.message);
+  }
+};
+
+const runAllSyncs = async () => { 
+  await syncZoeFeed(); 
+  await syncWorkFeed(); 
+  await syncSchoolFeed(); 
+};
 runAllSyncs();
 setInterval(runAllSyncs, 5 * 60 * 1000);
 
@@ -186,12 +220,13 @@ app.delete('/api/admin/users/:id', authenticateToken, requireAdmin, async (req, 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// CALENDAR SYSTEM MATRIX DISPATCHER
+// CALENDAR SYSTEM MATRIX DISPATCHER - SEPARATION ENGINE CORRECTED HERE
 app.get('/api/events', authenticateToken, async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
     let dbResult;
-    // Query filtering layer optimization
+    
+    // Always query database records matching target domain, or pull all for combined dashboard views
     if (targetView === 'combined') {
       dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
     } else {
@@ -206,9 +241,9 @@ app.get('/api/events', authenticateToken, async (req, res) => {
       metricSentiment: row.metric_sentiment, metricLocation: row.metric_location, metricSeverity: row.metric_severity
     }));
 
-    // CRITICAL FIX: EXPLICIT ISOLATION STREAM ROUTING BYPASSED TO RE-AGGREGATE DYNAMIC FEEDS ACCURATELY
+    // MASTER ENGINE DISPATCH JOINER
     if (targetView === 'combined') {
-      return res.json([...localEvents, ...ZOE_CACHE, ...WORK_CACHE]);
+      return res.json([...localEvents, ...ZOE_CACHE, ...WORK_CACHE, ...SCHOOL_CACHE]);
     }
     if (targetView === 'zoe') {
       return res.json([...localEvents, ...ZOE_CACHE]);
@@ -216,8 +251,10 @@ app.get('/api/events', authenticateToken, async (req, res) => {
     if (targetView === 'work') {
       return res.json([...localEvents, ...WORK_CACHE]);
     }
+    if (targetView === 'public-gcal') {
+      return res.json([...localEvents, ...SCHOOL_CACHE]);
+    }
     
-    // For standalone database views ('kids-logs', 'liam-life'), return only the matching database array
     return res.json(localEvents);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
