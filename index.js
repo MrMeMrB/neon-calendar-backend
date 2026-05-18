@@ -59,7 +59,6 @@ const initDb = async () => {
     );
   `);
 
-  // Auto-seed the core users dynamically if they do not exist
   const userCheck = await pool.query('SELECT * FROM users WHERE username IN ($1, $2)', ['LiamBaker', 'ZoeHenry']);
   if (userCheck.rows.length === 0) {
     const liamHash = await bcrypt.hash('L1@m19892022', 10);
@@ -206,9 +205,22 @@ app.get('/api/events', authenticateToken, async (req, res) => {
       metricSentiment: row.metric_sentiment, metricLocation: row.metric_location, metricSeverity: row.metric_severity
     }));
 
-    if (targetView === 'combined') return res.json([...localEvents, ...ZOE_CACHE, ...WORK_CACHE]);
-    if (targetView === 'zoe') return res.json([...localEvents, ...ZOE_CACHE]);
-    if (targetView === 'work') return res.json([...localEvents, ...WORK_CACHE]);
+    // FIXED ISOLATION ROUTING
+    if (targetView === 'combined') {
+      return res.json([...localEvents, ...ZOE_CACHE, ...WORK_CACHE]);
+    }
+    if (targetView === 'zoe') {
+      // Return ONLY local database entries saved explicitly to 'zoe' plus the live sync iCal cache
+      const zoeLocalOnly = localEvents.filter(e => e.calendar === 'zoe');
+      return res.json([...zoeLocalOnly, ...ZOE_CACHE]);
+    }
+    if (targetView === 'work') {
+      // Return ONLY local database entries saved explicitly to 'work' plus the live sync iCal cache
+      const workLocalOnly = localEvents.filter(e => e.calendar === 'work');
+      return res.json([...workLocalOnly, ...WORK_CACHE]);
+    }
+    
+    // For 'kids-logs' or 'liam-life' views, return exactly what the database isolated
     return res.json(localEvents);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
