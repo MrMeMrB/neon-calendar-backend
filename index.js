@@ -1,15 +1,9 @@
 import express from 'express';
 import cors from 'cors';
-import sqlite3 from 'sqlite3';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import pkg from 'pg';
 import multer from 'multer';
 
-// Recreate __dirname since it doesn't exist natively in ES Modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const sqlite3Verbose = sqlite3.verbose();
+const { Pool } = pkg;
 
 // Setup file ingestion for images
 const storage = multer.memoryStorage();
@@ -21,148 +15,145 @@ const PORT = process.env.PORT || 5001;
 app.use(cors());
 app.use(express.json());
 
-// Initialize Local High Performance Database Instance
-const dbPath = path.resolve(__dirname, 'intelligence_matrix.db');
-const db = new sqlite3Verbose.Database(dbPath, (err) => {
-  if (err) {
-    console.error('Error opening SQLITE workspace database:', err.message);
-  } else {
-    console.log('Connected smoothly to intelligence_matrix SQLite DB.');
-    bootstrapDatabaseStructure();
+// Initialize Remote Persistent Neon PostgreSQL Database Instance
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false // Required for secure cloud hosting connections
   }
 });
 
-// Bootstrap schemas safely
-function bootstrapDatabaseStructure() {
-  db.serialize(() => {
+// Test connection and bootstrap schemas safely
+async function bootstrapDatabaseStructure() {
+  try {
     // Core Events Table Setup
-    db.run(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         title TEXT NOT NULL,
-        start TEXT NOT NULL,
-        end TEXT,
+        start_time TEXT NOT NULL,
+        end_time TEXT,
         description TEXT,
         calendar TEXT DEFAULT 'combined',
-        isUnverified INTEGER DEFAULT 0,
-        isExternal INTEGER DEFAULT 1,
+        is_unverified INTEGER DEFAULT 0,
+        is_external INTEGER DEFAULT 1,
         sentiment TEXT DEFAULT 'neutral'
       )
     `);
 
     // Dynamic Tracking Notes Table Setup
-    db.run(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS event_notes (
         event_id INTEGER PRIMARY KEY,
-        notes TEXT,
-        FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
+        notes TEXT
       )
     `);
 
     // Scratchpad Storage Setup
-    db.run(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS general_notes (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         content TEXT
       )
     `);
 
-    // Backwards Compatibility Schema Patch
-    db.all("PRAGMA table_info(events)", (err, rows) => {
-      if (err) return;
-      const hasSentiment = rows.some(row => row.name === 'sentiment');
-      if (!hasSentiment) {
-        db.run("ALTER TABLE events ADD COLUMN sentiment TEXT DEFAULT 'neutral'");
-        console.log("Patched events schema array matrix with modern structural tracking metric.");
-      }
-    });
-  });
+    console.log('Connected smoothly to your live Neon PostgreSQL Database.');
+  } catch (err) {
+    console.error('Error bootstrapping database tables:', err.message);
+  }
 }
+
+bootstrapDatabaseStructure();
 
 /* ==========================================
    1. CORE CALENDAR DATA LOGISTICS
    ========================================== */
 
 // Pull Master Sorted Event Vector Streams
-app.get('/api/events', (req, res) => {
+app.get('/api/events', async (req, res) => {
   const { calendar } = req.query;
-  let query = "SELECT * FROM events";
+  let query = 'SELECT id, title, start_time as start, end_time as end, description, calendar, is_unverified as "isUnverified", is_external as "isExternal", sentiment FROM events';
   let params = [];
 
   if (calendar && calendar !== 'combined') {
-    query += " WHERE calendar = ?";
+    query += " WHERE calendar = $1";
     params.push(calendar);
   }
 
-  query += " ORDER BY datetime(start) ASC";
+  query += " ORDER BY start_time ASC";
 
-  db.all(query, params, (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    // Normalize SQL format boolean tags cleanly back out to JS client states
-    const processed = rows.map(r => ({
+  try {
+    const result = await pool.query(query, params);
+    const processed = result.rows.map(r => ({
       ...r,
       isUnverified: !!r.isUnverified,
       isExternal: !!r.isExternal
     }));
     res.json(processed);
-  });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Drop New Action Log Entry Manually Into Grid
-app.post('/api/events', (req, res) => {
+app.post('/api/events', async (req, res) => {
   const { title, start, end, description, calendar, sentiment } = req.body;
   const targetCal = calendar || 'combined';
   const targetSentiment = sentiment || 'neutral';
 
-  const query = `INSERT INTO events (title, start, end, description, calendar, isUnverified, isExternal, sentiment) VALUES (?, ?, ?, ?, ?, 0, 0, ?)`;
+  const query = `INSERT INTO events (title, start_time, end_time, description, calendar, is_unverified, is_external, sentiment) VALUES ($1, $2, $3, $4, $5, 0, 0, $6) RETURNING id`;
   
-  db.run(query, [title, start, end || null, description || "", targetCal, targetSentiment], function(err) {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ success: true, eventId: this.lastID });
-  });
+  try {
+    const result = await pool.query(query, [title, start, end || null, description || "", targetCal, targetSentiment]);
+    res.json({ success: true, eventId: result.rows[0].id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /* ==========================================
    2. SEAMLESS REPLICATING CLONE ENGINE
    ========================================== */
 
-app.post('/api/events/route-clone', (req, res) => {
+app.post('/api/events/route-clone', async (req, res) => {
   const { title, start, end, description, targetCalendar, isExternal } = req.body;
   if (!title || !start || !targetCalendar) {
     return res.status(400).json({ error: "Missing identity tracking definitions." });
   }
 
   const query = `
-    INSERT INTO events (title, start, end, description, calendar, isUnverified, isExternal, sentiment)
-    VALUES (?, ?, ?, ?, ?, 0, ?, 'neutral')
+    INSERT INTO events (title, start_time, end_time, description, calendar, is_unverified, is_external, sentiment)
+    VALUES ($1, $2, $3, $4, $5, 0, $6, 'neutral') RETURNING id
   `;
 
-  db.run(query, [title, start, end || null, description || "", targetCalendar, isExternal ? 1 : 0], function(err) {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ success: true, message: "Matrix stream duplicated seamlessly.", clonedId: this.lastID });
-  });
+  try {
+    const result = await pool.query(query, [title, start, end || null, description || "", targetCalendar, isExternal ? 1 : 0]);
+    res.json({ success: true, message: "Matrix stream duplicated seamlessly.", clonedId: result.rows[0].id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /* ==========================================
    3. VERIFICATION AND FEEDBACK LEARNING ENDPOINTS
    ========================================== */
 
-app.post('/api/events/learn', (req, res) => {
+app.post('/api/events/learn', async (req, res) => {
   const { eventId, status } = req.body;
   if (!eventId) return res.status(400).json({ error: "Target structural context undefined." });
 
-  if (status === 'blocked') {
-    db.run("DELETE FROM events WHERE id = ?", [eventId], (err) => {
-      if (err) return res.status(500).json({ error: err.message });
+  try {
+    if (status === 'blocked') {
+      await pool.query("DELETE FROM events WHERE id = $1", [eventId]);
       res.json({ success: true, action: "purged" });
-    });
-  } else if (status === 'verified_kid') {
-    db.run("UPDATE events SET isUnverified = 0, calendar = 'family' WHERE id = ?", [eventId], (err) => {
-      if (err) return res.status(500).json({ error: err.message });
+    } else if (status === 'verified_kid') {
+      await pool.query("UPDATE events SET is_unverified = 0, calendar = 'family' WHERE id = $1", [eventId]);
       res.json({ success: true, action: "re-routed" });
-    });
-  } else {
-    res.status(400).json({ error: "Unknown instructional vector state type." });
+    } else {
+      res.status(400).json({ error: "Unknown instructional vector state type." });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -170,36 +161,50 @@ app.post('/api/events/learn', (req, res) => {
    4. INTERACTIVE EXAMPLES & ANNOTATIONS
    ========================================== */
 
-app.get('/api/events/:id/notes', (req, res) => {
-  db.get("SELECT notes FROM event_notes WHERE event_id = ?", [req.params.id], (err, row) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ notes: row ? row.notes : "" });
-  });
+app.get('/api/events/:id/notes', async (req, res) => {
+  try {
+    const result = await pool.query("SELECT notes FROM event_notes WHERE event_id = $1", [req.params.id]);
+    res.json({ notes: result.rows[0] ? result.rows[0].notes : "" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/api/events/:id/notes', (req, res) => {
+app.post('/api/events/:id/notes', async (req, res) => {
   const { notes } = req.body;
-  db.run(`INSERT INTO event_notes (event_id, notes) VALUES (?, ?) ON CONFLICT(event_id) DO UPDATE SET notes = excluded.notes`,
-    [req.params.id, notes], (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ success: true });
-  });
+  const query = `
+    INSERT INTO event_notes (event_id, notes) VALUES ($1, $2) 
+    ON CONFLICT(event_id) DO UPDATE SET notes = EXCLUDED.notes
+  `;
+  try {
+    await pool.query(query, [req.params.id, notes]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get('/api/general-notes', (req, res) => {
-  db.get("SELECT content FROM general_notes WHERE id = 1", (err, row) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ content: row ? row.content : "" });
-  });
+app.get('/api/general-notes', async (req, res) => {
+  try {
+    const result = await pool.query("SELECT content FROM general_notes WHERE id = 1");
+    res.json({ content: result.rows[0] ? result.rows[0].content : "" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/api/general-notes', (req, res) => {
+app.post('/api/general-notes', async (req, res) => {
   const { content } = req.body;
-  db.run(`INSERT INTO general_notes (id, content) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.content`,
-    [content], (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ success: true });
-  });
+  const query = `
+    INSERT INTO general_notes (id, content) VALUES (1, $1) 
+    ON CONFLICT(id) DO UPDATE SET content = EXCLUDED.content
+  `;
+  try {
+    await pool.query(query, [content]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /* ==========================================
@@ -209,9 +214,7 @@ app.post('/api/general-notes', (req, res) => {
 app.post('/api/extract-text', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No image payload asset presented to router input." });
-
     const mockExtractedText = `[EXTRACTED ASSET METRIC SUMMARY]\nProcessed Entry Log: School Info Pack Data\nDate Context: ${new Date().toLocaleDateString()}\nStatus Details: Completed with near-zero performance resource usage profile.`;
-
     res.json({ extractedText: mockExtractedText });
   } catch (err) {
     console.error("Extraction matrix failure:", err);
@@ -223,97 +226,93 @@ app.post('/api/extract-text', upload.single('image'), async (req, res) => {
    6. DYNAMIC AUTOMATED PDF COMPILE ENGINE
    ========================================== */
 
-app.get('/api/events/export-pdf', (req, res) => {
+app.get('/api/events/export-pdf', async (req, res) => {
   const { calendar } = req.query;
-  let query = "SELECT * FROM events";
+  let query = "SELECT title, start_time as start, description, calendar, sentiment FROM events";
   let params = [];
 
   if (calendar && calendar !== 'combined') {
-    query += " WHERE calendar = ?";
+    query += " WHERE calendar = $1";
     params.push(calendar);
   }
-  query += " ORDER BY datetime(start) ASC";
+  query += " ORDER BY start_time ASC";
 
-  db.all(query, params, async (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
+  try {
+    const result = await pool.query(query, params);
+    const rows = result.rows;
 
-    try {
-      let reportLayoutHtml = `
-        <html>
-        <head>
-          <style>
-            body { font-family: Helvetica, Arial, sans-serif; padding: 30px; color: #1e293b; background: #fff; }
-            .header { border-bottom: 2px solid #0284c7; padding-bottom: 12px; margin-bottom: 24px; }
-            .title { font-size: 22px; font-weight: bold; color: #0f172a; text-transform: uppercase; margin: 0; }
-            .meta { font-size: 11px; color: #64748b; margin-top: 4px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px; }
-            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-            th { text-align: left; padding: 10px; background: #f1f5f9; color: #475569; font-size: 11px; font-weight: bold; text-transform: uppercase; border-bottom: 1px solid #cbd5e1; }
-            td { padding: 12px 10px; font-size: 13px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
-            .date-badge { font-weight: bold; color: #0284c7; white-space: nowrap; }
-            .desc { color: #475569; font-size: 12px; margin-top: 3px; line-height: 1.4; }
-            .badge { display: inline-block; padding: 2px 6px; font-size: 10px; font-weight: bold; border-radius: 4px; text-transform: uppercase; color: #fff; }
-            .pos { background: #10b981; }
-            .neg { background: #ef4444; }
-            .neu { background: #64748b; }
-          </style>
-        </head>
-        <body>
-          <div class="header">
-            <div class="title">Calendar Log Intelligence Report</div>
-            <div class="meta">Target Scope Matrix: ${calendar || 'Master Hub'} | Compiled: ${new Date().toLocaleDateString()}</div>
-          </div>
-          <table>
-            <thead>
-              <tr>
-                <th style="width: 20%;">Schedule Axis</th>
-                <th style="width: 55%;">Log Metric / Context Track</th>
-                <th style="width: 25%;">Target Domain Scope</th>
-              </tr>
-            </thead>
-            <tbody>
-      `;
-
-      if (rows.length === 0) {
-        reportLayoutHtml += `<tr><td colspan="3" style="text-align: center; color: #94a3b8; padding: 30px;">No tracking records found inside this vector window block.</td></tr>`;
-      } else {
-        rows.forEach(event => {
-          const formattedDate = new Date(event.start).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-          
-          let markerHtml = "";
-          if (event.calendar === 'kids-logs') {
-            if (event.sentiment === 'positive') markerHtml = ' <span class="badge pos">Positive</span>';
-            if (event.sentiment === 'negative') markerHtml = ' <span class="badge neg">Negative</span>';
-            if (event.sentiment === 'neutral') markerHtml = ' <span class="badge neu">Neutral</span>';
-          }
-
-          reportLayoutHtml += `
+    let reportLayoutHtml = `
+      <html>
+      <head>
+        <style>
+          body { font-family: Helvetica, Arial, sans-serif; padding: 30px; color: #1e293b; background: #fff; }
+          .header { border-bottom: 2px solid #0284c7; padding-bottom: 12px; margin-bottom: 24px; }
+          .title { font-size: 22px; font-weight: bold; color: #0f172a; text-transform: uppercase; margin: 0; }
+          .meta { font-size: 11px; color: #64748b; margin-top: 4px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px; }
+          table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+          th { text-align: left; padding: 10px; background: #f1f5f9; color: #475569; font-size: 11px; font-weight: bold; text-transform: uppercase; border-bottom: 1px solid #cbd5e1; }
+          td { padding: 12px 10px; font-size: 13px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+          .date-badge { font-weight: bold; color: #0284c7; white-space: nowrap; }
+          .desc { color: #475569; font-size: 12px; margin-top: 3px; line-height: 1.4; }
+          .badge { display: inline-block; padding: 2px 6px; font-size: 10px; font-weight: bold; border-radius: 4px; text-transform: uppercase; color: #fff; }
+          .pos { background: #10b981; }
+          .neg { background: #ef4444; }
+          .neu { background: #64748b; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div class="title">Calendar Log Intelligence Report</div>
+          <div class="meta">Target Scope Matrix: ${calendar || 'Master Hub'} | Compiled: ${new Date().toLocaleDateString()}</div>
+        </div>
+        <table>
+          <thead>
             <tr>
-              <td class="date-badge">${formattedDate}</td>
-              <td>
-                <strong>${event.title}</strong>${markerHtml}
-                ${event.description ? `<div class="desc">${event.description}</div>` : ""}
-              </td>
-              <td style="color: #475569; font-weight: 500; text-transform: uppercase; font-size: 11px;">${event.calendar}</td>
+              <th style="width: 20%;">Schedule Axis</th>
+              <th style="width: 55%;">Log Metric / Context Track</th>
+              <th style="width: 25%;">Target Domain Scope</th>
             </tr>
-          `;
-        });
-      }
+          </thead>
+          <tbody>
+    `;
 
-      reportLayoutHtml += `
-            </tbody>
-          </table>
-        </body>
-        </html>
-      `;
-      
-      res.setHeader('Content-Type', 'text/html');
-      res.status(200).send(reportLayoutHtml);
+    if (rows.length === 0) {
+      reportLayoutHtml += `<tr><td colspan="3" style="text-align: center; color: #94a3b8; padding: 30px;">No tracking records found inside this vector window block.</td></tr>`;
+    } else {
+      rows.forEach(event => {
+        const formattedDate = new Date(event.start).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        let markerHtml = "";
+        if (event.calendar === 'kids-logs') {
+          if (event.sentiment === 'positive') markerHtml = ' <span class="badge pos">Positive</span>';
+          if (event.sentiment === 'negative') markerHtml = ' <span class="badge neg">Negative</span>';
+          if (event.sentiment === 'neutral') markerHtml = ' <span class="badge neu">Neutral</span>';
+        }
 
-    } catch (pdfErr) {
-      console.error("PDF engine failure:", pdfErr);
-      res.status(500).json({ error: "Could not safely process print document matrix stream parameters." });
+        reportLayoutHtml += `
+          <tr>
+            <td class="date-badge">${formattedDate}</td>
+            <td>
+              <strong>${event.title}</strong>${markerHtml}
+              ${event.description ? `<div class="desc">${event.description}</div>` : ""}
+            </td>
+            <td style="color: #475569; font-weight: 500; text-transform: uppercase; font-size: 11px;">${event.calendar}</td>
+          </tr>
+        `;
+      });
     }
-  });
+
+    reportLayoutHtml += `
+          </tbody>
+        </table>
+      </body>
+      </html>
+    `;
+    
+    res.setHeader('Content-Type', 'text/html');
+    res.status(200).send(reportLayoutHtml);
+  } catch (err) {
+    res.status(500).json({ error: "Could not safely process print document matrix stream parameters." });
+  }
 });
 
 app.listen(PORT, () => {
