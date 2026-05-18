@@ -133,11 +133,10 @@ const updateAllCalendarsCache = async () => {
 updateAllCalendarsCache();
 setInterval(updateAllCalendarsCache, 5 * 60 * 1000);
 
-// STRICT CATEGORY VIEWS FILTERING
+// FIX: LINK LIVE STREAMS TO COMPONENT FILTERS
 app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
-    // 1. Pull database items filtered strictly by the current view
     let dbResult;
     if (targetView === 'combined') {
       dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
@@ -159,20 +158,23 @@ app.get('/api/events', async (req, res) => {
              row.calendar === 'kids-logs' ? '#ec4899' : '#10b981'
     }));
 
-    // 2. STRICT SEPARATION POINT: Only attach live streams if they match the active tab
+    // FIXED MERGE LOGIC: Combines local entries with live live-stream arrays on isolated matches
     if (targetView === 'combined') {
-      const finalPayload = [
+      return res.json([
         ...localEvents,
         ...memoryCache.liam,
         ...memoryCache.zoe,
         ...memoryCache.work,
         ...memoryCache.family
-      ];
-      return res.json(finalPayload);
+      ]);
     }
 
     if (targetView === 'zoe') {
       return res.json([...localEvents, ...memoryCache.zoe]);
+    }
+
+    if (targetView === 'work') {
+      return res.json([...localEvents, ...memoryCache.work]);
     }
 
     if (targetView === 'family') {
@@ -183,37 +185,25 @@ app.get('/api/events', async (req, res) => {
       return res.json([...localEvents, ...memoryCache.liam]);
     }
 
-    if (targetView === 'work') {
-      return res.json([...localEvents, ...memoryCache.work]);
-    }
-
-    if (targetView === 'kids-logs') {
-      return res.json(localEvents);
-    }
-
     res.json(localEvents);
   } catch (err) { 
     res.status(500).json({ error: err.message }); 
   }
 });
 
-// ROUTING MANEUVER: Transfers an event to another bucket locally
 app.post('/api/events/route', async (req, res) => {
   const { eventId, title, start, end, description, targetCalendar, isExternal } = req.body;
   try {
     if (isExternal) {
-      // 1. Write as a permanent local record under your target scope
       await pool.query(
         'INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5)',
         [title.replace('❓ ', ''), start, end || null, description, targetCalendar]
       );
-      // 2. Add to external learning suppression map so it disappears from the original automated feed
       await pool.query(
         'INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status',
         [eventId, 'blocked']
       );
     } else {
-      // If it's already a local entry, simply modify its current target destination column
       await pool.query('UPDATE events SET calendar = $1 WHERE id = $2', [targetCalendar, eventId]);
     }
 
