@@ -17,14 +17,10 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-let memoryCache = { liam: [], zoe: [], work: [], family: [] };
-
-const KIDS_KEYWORDS = [
-  'jasper', 'indie', 'jb', 'ib school', 'phonics', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 
-  'parents', 'term', 'half term', 'summer holiday', 'holiday', 'haven', 'centre'
-];
+let memoryCache = { zoe: [], work: [], family: [] };
 
 const initDb = async () => {
+  // Enhanced schema to support behavioural tracking parameters
   await pool.query(`
     CREATE TABLE IF NOT EXISTS events (
       id SERIAL PRIMARY KEY,
@@ -32,7 +28,10 @@ const initDb = async () => {
       start_time TIMESTAMP WITH TIME ZONE NOT NULL,
       end_time TIMESTAMP WITH TIME ZONE,
       description TEXT,
-      calendar VARCHAR(50) DEFAULT 'combined'
+      calendar VARCHAR(50) DEFAULT 'combined',
+      metric_sentiment VARCHAR(50), 
+      metric_location VARCHAR(50),   
+      metric_severity INT DEFAULT 0  
     );
   `);
 
@@ -45,11 +44,11 @@ const initDb = async () => {
     );
   `);
 
-  console.log("PostgreSQL Schema Initialized.");
+  console.log("PostgreSQL Relational Metrics Schema Operational.");
 };
 initDb().catch(console.error);
 
-const fetchExternalCalendar = async (url, domainName, defaultColor, applyZoeKidsFilter = false) => {
+const fetchExternalCalendar = async (url, domainName, defaultColor) => {
   if (!url) return [];
   try {
     const data = await ical.async.fromURL(url, {
@@ -66,31 +65,21 @@ const fetchExternalCalendar = async (url, domainName, defaultColor, applyZoeKids
     return Object.values(data)
       .filter(event => {
         if (event.type !== 'VEVENT' || !event.start) return false;
+        
+        // Hide elements routed or purged by user choice
         if (stateMap.get(event.uid) === 'blocked') return false; 
 
         const eventStart = new Date(event.start);
         return eventStart >= startWindow && eventStart <= endWindow;
       })
-      .filter(event => {
-        if (!applyZoeKidsFilter) return true;
-        if (stateMap.get(event.uid) === 'verified_kid') return true;
-
-        const textPayload = `${event.summary || ''} ${event.description || ''}`.toLowerCase();
-        return KIDS_KEYWORDS.some(keyword => textPayload.includes(keyword));
-      })
       .map(event => {
-        const status = stateMap.get(event.uid) || 'unverified';
         let title = event.summary || "Untitled Event";
-        let color = defaultColor; 
-        let isUnverified = false;
-        let targetCalendar = domainName;
-
-        // If it hits the keyword rule and isn't verified, split it off to kids-logs
-        if (applyZoeKidsFilter && status === 'unverified') {
-          title = `❓ ${title}`;
-          color = '#ffaa00'; 
-          isUnverified = true;
-          targetCalendar = 'kids-logs';
+        
+        // Process Outlook-specific tentative statuses without skipping them
+        const isTentative = event['X-MICROSOFT-CDO-BUSYSTATUS'] === 'TENTATIVE' || 
+                            String(event.description).includes('Tentative');
+        if (isTentative && domainName === 'work') {
+          title = `⏳ [Tentative] ${title}`;
         }
 
         return {
@@ -99,26 +88,26 @@ const fetchExternalCalendar = async (url, domainName, defaultColor, applyZoeKids
           start: new Date(event.start).toISOString(),
           end: event.end ? new Date(event.end).toISOString() : null,
           description: event.description || '',
-          color: color,
-          calendar: targetCalendar,
-          isUnverified: isUnverified,
+          color: defaultColor,
+          calendar: domainName,
+          isUnverified: false,
           isExternal: true
         };
       });
   } catch (err) {
-    console.error(`iCal Parse error for ${domainName}:`, err.message);
+    console.error(`iCal extraction dropped for ${domainName}:`, err.message);
     return [];
   }
 };
 
 const updateAllCalendarsCache = async () => {
   try {
-    // FIX: Zoe's clean stream mapped directly to 'zoe', work to 'work', family to 'family'
-    if (process.env.ICAL_URL_ZOE) memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, 'zoe', '#f43f5e', true);
+    // Zoe and Work feeds now pass through 100% cleanly without structural restrictions
+    if (process.env.ICAL_URL_ZOE) memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, 'zoe', '#f43f5e');
     if (process.env.ICAL_URL_WORK) memoryCache.work = await fetchExternalCalendar(process.env.ICAL_URL_WORK, 'work', '#818cf8');
     if (process.env.ICAL_URL_FAMILY) memoryCache.family = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, 'family', '#f59e0b');
-    console.log("Memory caches re-indexed successfully.");
-  } catch (err) { console.error("Cache sync failed:", err); }
+    console.log("Operational external streams cached.");
+  } catch (err) { console.error("Cache iteration error:", err); }
 };
 
 updateAllCalendarsCache();
@@ -142,41 +131,30 @@ app.get('/api/events', async (req, res) => {
       description: row.description || '',
       calendar: row.calendar || 'combined',
       isExternal: false,
-      isUnverified: false,
       color: row.calendar === 'zoe' ? '#f43f5e' : 
              row.calendar === 'work' ? '#818cf8' : 
-             row.calendar === 'family' ? '#f59e0b' : 
-             row.calendar === 'kids-logs' ? '#ec4899' : '#10b981'
+             row.calendar === 'liam-life' ? '#00f0ff' : 
+             row.calendar === 'kids-logs' ? '#ec4899' : '#10b981',
+      // Deliver logged structural values back to UI layout
+      metricSentiment: row.metric_sentiment,
+      metricLocation: row.metric_location,
+      metricSeverity: row.metric_severity
     }));
 
+    const allExternal = [
+      ...memoryCache.zoe,
+      ...memoryCache.work,
+      ...memoryCache.family
+    ];
+
     if (targetView === 'combined') {
-      return res.json([
-        ...localEvents,
-        ...memoryCache.zoe,
-        ...memoryCache.work,
-        ...memoryCache.family
-      ]);
+      return res.json([...localEvents, ...allExternal]);
     }
 
-    if (targetView === 'kids-logs') {
-      const externalKids = memoryCache.zoe.filter(e => e.calendar === 'kids-logs');
-      return res.json([...localEvents, ...externalKids]);
-    }
+    // Isolate structural stream distributions directly
+    const filteredExternal = allExternal.filter(e => e.calendar === targetView);
+    return res.json([...localEvents, ...filteredExternal]);
 
-    if (targetView === 'zoe') {
-      const externalZoe = memoryCache.zoe.filter(e => e.calendar === 'zoe');
-      return res.json([...localEvents, ...externalZoe]);
-    }
-
-    if (targetView === 'work') {
-      return res.json([...localEvents, ...memoryCache.work]);
-    }
-
-    if (targetView === 'family') {
-      return res.json([...localEvents, ...memoryCache.family]);
-    }
-
-    res.json(localEvents);
   } catch (err) { 
     res.status(500).json({ error: err.message }); 
   }
@@ -187,7 +165,7 @@ app.post('/api/events/route', async (req, res) => {
   try {
     await pool.query(
       'INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5)',
-      [title.replace('❓ ', ''), start, end || null, description, targetCalendar]
+      [title, start, end || null, description, targetCalendar]
     );
 
     if (isExternal) {
@@ -215,9 +193,14 @@ app.post('/api/events/learn', async (req, res) => {
 });
 
 app.post('/api/events', async (req, res) => {
-  const { title, start, end, description, calendar } = req.body;
+  const { title, start, end, description, calendar, metricSentiment, metricLocation, metricSeverity } = req.body;
   try {
-    const result = await pool.query('INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5) RETURNING *', [title, start, end || null, description || '', calendar || 'combined']);
+    const result = await pool.query(
+      `INSERT INTO events 
+       (title, start_time, end_time, description, calendar, metric_sentiment, metric_location, metric_severity) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`, 
+      [title, start, end || null, description || '', calendar || 'combined', metricSentiment || null, metricLocation || null, metricSeverity ? parseInt(metricSeverity) : 0]
+    );
     res.json({ success: true, event: result.rows[0] });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
