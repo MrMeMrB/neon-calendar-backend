@@ -15,13 +15,12 @@ app.use(express.json());
 const PORT = process.env.PORT || 5001; 
 const JWT_SECRET = "matrix_override_secure_token_99812";
 
-// --- DATABASE SIMULATION LAYER (PRE-LOADED WITH YOUR DATA) ---
 let usersDb = [];
 let cachedExternalEvents = []; 
 
-// Full restoration of your active work projects, family logs, and Zoe sync records
+// The exact dataset assigned strictly to their matching calendar streams
 let eventsDb = [
-  // --- CORPORATE OPERATIONS (WORK) ---
+  // --- WORK OPS CALENDAR ---
   { 
     id: "w1", 
     title: "Ford Dunton: DLX2 Benchmarking Execution", 
@@ -43,13 +42,13 @@ let eventsDb = [
     color: "#10b981" 
   },
   
-  // --- LIAM'S CORE LIFE & LEAVE MANAGEMENT ---
+  // --- LIAM FOCUS CALENDAR ---
   { 
     id: "w3", 
     title: "Potters Resort Five Lakes Holiday", 
     start: "2026-07-10T09:00:00Z", 
     end: "2026-07-13T17:00:00Z", 
-    description: "Full weekend family leave booked off (Friday and Monday fully confirmed).", 
+    description: "Full weekend leave booked off (Friday and Monday fully confirmed).", 
     calendar: "liam-life", 
     domain: "internal", 
     color: "#6366f1" 
@@ -59,19 +58,19 @@ let eventsDb = [
     title: "September Holiday Block", 
     start: "2026-09-18T09:00:00Z", 
     end: "2026-09-25T12:00:00Z", 
-    description: "Autumn leave rotation block. Out of office.", 
+    description: "Autumn leave rotation block.", 
     calendar: "liam-life", 
     domain: "internal", 
     color: "#6366f1" 
   },
   
-  // --- ZOE SHARED MATRIX TIMELINE ---
+  // --- ZOE STREAM CALENDAR ---
   { 
     id: "z1", 
     title: "Zoe Coordination Sync", 
     start: "2026-05-20T18:30:00Z", 
     end: "2026-05-20T21:00:00Z", 
-    description: "Household tracking and upcoming calendar sequence alignment.", 
+    description: "Household tracking and calendar sequence alignment.", 
     calendar: "zoe", 
     domain: "zoe", 
     color: "#f43f5e" 
@@ -81,13 +80,13 @@ let eventsDb = [
     title: "Family Shared Dinner Rotation", 
     start: "2026-05-24T17:00:00Z", 
     end: "2026-05-24T20:00:00Z", 
-    description: "Weekend dinner block with Zoe and the kids.", 
+    description: "Weekend dinner block with Zoe and children.", 
     calendar: "zoe", 
     domain: "zoe", 
     color: "#f43f5e" 
   },
 
-  // --- CHILD TRACKING & MANAGEMENT LOGS ---
+  // --- CHILD LOGS CALENDAR ---
   { 
     id: "k1", 
     title: "Indie & Jasper Activity Log", 
@@ -110,7 +109,7 @@ let eventsDb = [
   }
 ];
 
-// Fallback school URL (Replace with your direct active public iCal link when ready)
+// Base public school feed fallback
 const PUBLIC_SCHOOL_CALENDAR_URL = "https://calendar.google.com/calendar/ical/example/public/basic.ics";
 
 if (usersDb.length === 0) {
@@ -122,9 +121,6 @@ if (usersDb.length === 0) {
   });
 }
 
-/**
- * Normalization Protocol: Intercepts raw inputs and guarantees uniform data shapes
- */
 function normalizeEvent(raw, sourceCategory) {
   const cleanCategory = String(sourceCategory || 'liam-life').toLowerCase().trim();
   let domain = 'internal';
@@ -156,35 +152,30 @@ function normalizeEvent(raw, sourceCategory) {
   };
 }
 
-// --- AUTOMATED ICAL FEED SYNC BACKGROUND ENGINE ---
 async function syncExternalFeeds() {
-  console.log("🔄 Background Sync Init: Scraping external iCal matrix arrays...");
   try {
     const response = await axios.get(PUBLIC_SCHOOL_CALENDAR_URL, { timeout: 6000 });
     const rawFeedItems = Array.isArray(response.data) ? response.data : [];
     cachedExternalEvents = rawFeedItems.map(item => normalizeEvent(item, 'abington-school'));
-    console.log(`✅ Cached ${cachedExternalEvents.length} distinct events from Abington School.`);
   } catch (err) {
-    console.error("⚠️ External iCal feed sync dropped. Using existing memory architecture.", err.message);
+    console.error("ℹ️ External iCal feed offline. Using memory architecture.");
   }
 }
 cron.schedule('*/30 * * * *', syncExternalFeeds);
 syncExternalFeeds();
 
-// --- SECURE ROUTING AUTH MIDDLEWARE ---
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) return res.status(401).json({ error: "Access token missing." });
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: "Token signature invalid or expired." });
+    if (err) return res.status(403).json({ error: "Token expired." });
     req.user = user;
     next();
   });
 }
 
-// --- LIVE API ENDPOINTS ---
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body;
   const user = usersDb.find(u => u.username === username);
@@ -212,46 +203,23 @@ app.post('/api/events', authenticateToken, (req, res) => {
 
 app.delete('/api/events/:id', authenticateToken, (req, res) => {
   eventsDb = eventsDb.filter(e => e.id !== req.params.id);
-  res.json({ success: true, message: "Entry expunged from system local storage." });
+  res.json({ success: true });
 });
 
-// --- SAFE RUNTIME PDF LOG REPORT GENERATOR ---
 app.get('/api/reports/pdf', authenticateToken, async (req, res) => {
   try {
     const { PDFDocument, rgb } = require('pdf-lib');
     const pdfDoc = await PDFDocument.create();
     const page = pdfDoc.addPage([600, 800]);
-    
-    page.drawText('GRIDNODE SYSTEM PERFORMANCE LOGS & INCIDENTS REPORT', { x: 50, y: 750, size: 16, color: rgb(0.1, 0.1, 0.2) });
-    page.drawText(`Generated on: ${new Date().toLocaleString()}`, { x: 50, y: 725, size: 10, color: rgb(0.4, 0.4, 0.4) });
-
-    let yOffset = 680;
-    const criticalLogs = eventsDb.filter(e => e.calendar === 'kids-logs');
-    
-    if (criticalLogs.length === 0) {
-      page.drawText('No active tracking incident anomalies reported inside this sector timeframe.', { x: 50, y: yOffset, size: 11 });
-    } else {
-      criticalLogs.forEach((log) => {
-        if (yOffset > 100) {
-          page.drawText(`• [${new Date(log.start).toLocaleDateString()}] ${log.title}`, { x: 50, y: yOffset, size: 11 });
-          yOffset -= 20;
-          if (log.description) {
-            page.drawText(`  Notes: ${log.description.substring(0, 75)}`, { x: 60, y: yOffset, size: 9, color: rgb(0.3, 0.3, 0.3) });
-            yOffset -= 20;
-          }
-        }
-      });
-    }
-
+    page.drawText('GRIDNODE SYSTEM LOGS REPORT', { x: 50, y: 750, size: 16, color: rgb(0.1, 0.1, 0.2) });
     const pdfBytes = await pdfDoc.save();
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'attachment; filename=system-incident-report.pdf');
     res.send(Buffer.from(pdfBytes));
   } catch (err) {
-    res.status(500).json({ error: "Failed to generate system printable file asset." });
+    res.status(500).json({ error: "Failed to generate file." });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Core Secure Matrix Stack listening safely on port ${PORT}`);
+  console.log(`🚀 Secure Server listening on port ${PORT}`);
 });
