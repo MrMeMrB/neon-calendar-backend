@@ -63,7 +63,7 @@ const initDb = async () => {
   const userCheck = await pool.query('SELECT * FROM users WHERE username IN ($1, $2)', ['LiamBaker', 'ZoeHenry']);
   if (userCheck.rows.length === 0) {
     const liamHash = await bcrypt.hash('L1@m19892022', 10);
-    const zoeHash = await bcrypt.hash('password123', 10); // Replace with her temporary secure string as required
+    const zoeHash = await bcrypt.hash('password123', 10);
 
     await pool.query('INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', ['LiamBaker', liamHash, 'admin']);
     await pool.query('INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', ['ZoeHenry', zoeHash, 'user']);
