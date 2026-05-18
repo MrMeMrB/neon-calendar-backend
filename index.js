@@ -160,10 +160,10 @@ const syncSchoolFeed = async () => {
         start: new Date(e.start).toISOString(),
         end: e.end ? new Date(e.end).toISOString() : null,
         description: e.description || '',
-        calendar: 'public-gcal',
+        calendar: 'school', // Fixed identifier fallback logic
         color: '#0284c7',
         isExternal: true,
-        originCalendar: 'public-gcal'
+        originCalendar: 'school'
       }));
     console.log(`Abington School GCal Cached Natively: ${SCHOOL_CACHE.length} items.`);
   } catch (err) {
@@ -220,15 +220,17 @@ app.delete('/api/admin/users/:id', authenticateToken, requireAdmin, async (req, 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// CALENDAR SYSTEM MATRIX DISPATCHER - FIXED SEPARATION LOGIC
+// CALENDAR SYSTEM MATRIX DISPATCHER - SEPARATION ENGINE FIXED COMPLETELY
 app.get('/api/events', authenticateToken, async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
-    // FIX: Query the specific database calendar layer OR return all database rows if 'combined' is active
     let dbResult;
+    
+    // Pull correct layer entries from database matching frontend view context
     if (targetView === 'combined') {
       dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
     } else {
+      // Handles queries matching 'zoe', 'work', 'school', 'liam-life', or 'kids-logs'
       dbResult = await pool.query('SELECT * FROM events WHERE calendar = $1 ORDER BY start_time ASC', [targetView]);
     }
 
@@ -240,7 +242,7 @@ app.get('/api/events', authenticateToken, async (req, res) => {
       metricSentiment: row.metric_sentiment, metricLocation: row.metric_location, metricSeverity: row.metric_severity
     }));
 
-    // FIX: Decouple database empty validation so individual views successfully inject their stream arrays
+    // MASTER UNION ROUTER - Combines database rows with stored runtime iCal feeds
     if (targetView === 'combined') {
       return res.json([...localEvents, ...ZOE_CACHE, ...WORK_CACHE, ...SCHOOL_CACHE]);
     }
@@ -250,10 +252,11 @@ app.get('/api/events', authenticateToken, async (req, res) => {
     if (targetView === 'work') {
       return res.json([...localEvents, ...WORK_CACHE]);
     }
-    if (targetView === 'public-gcal') {
+    if (targetView === 'school' || targetView === 'public-gcal') {
       return res.json([...localEvents, ...SCHOOL_CACHE]);
     }
     
+    // Fallback for custom purely internal sheets like liam-life and kids-logs
     return res.json(localEvents);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
