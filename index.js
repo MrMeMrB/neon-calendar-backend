@@ -4,28 +4,18 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import cron from 'node-cron';
 import axios from 'axios';
-import { PDFDocument, rgb } from 'pdf-lib';
+import { createRequire } from 'module';
 
-// --- GLOBAL EXCEPTION CAPTURE LABELS ---
-// This forces Node to print the exact error to Render's logs instead of exiting silently
-process.on('uncaughtException', (err) => {
-  console.error('💥 CRITICAL UNCAUGHT EXCEPTION:', err.stack || err);
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('💥 CRITICAL UNHANDLED REJECTION AT:', promise, 'REASON:', reason);
-  process.exit(1);
-});
-
+const require = createRequire(import.meta.url);
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
-// Render injects the PORT variable. We stringify and parse it cleanly to avoid binding faults.
-const PORT = Number(process.env.PORT) || 5001; 
+const PORT = process.env.PORT || 5001; 
 const JWT_SECRET = "matrix_override_secure_token_99812";
 
+// --- DATABASE SIMULATION LAYER ---
 let usersDb = [];
 let eventsDb = []; 
 let cachedExternalEvents = []; 
@@ -72,6 +62,7 @@ function normalizeEvent(raw, sourceCategory) {
   };
 }
 
+// --- SYSTEM CRON ENGINE ---
 async function syncExternalFeeds() {
   console.log("🔄 Background Sync Init: Scraping external iCal matrix arrays...");
   try {
@@ -86,7 +77,7 @@ async function syncExternalFeeds() {
 cron.schedule('*/30 * * * *', syncExternalFeeds);
 syncExternalFeeds();
 
-// --- ROUTING MIDDLEWARE ---
+// --- JWT AUTHENTICATION MIDDLEWARE ---
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -99,6 +90,7 @@ function authenticateToken(req, res, next) {
   });
 }
 
+// --- API ROUTING PORTS ---
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body;
   const user = usersDb.find(u => u.username === username);
@@ -129,8 +121,11 @@ app.delete('/api/events/:id', authenticateToken, (req, res) => {
   res.json({ success: true, message: "Entry expunged from system local storage." });
 });
 
+// --- PDF INCIDENT/LOG REPORT GENERATOR ---
 app.get('/api/reports/pdf', authenticateToken, async (req, res) => {
   try {
+    // Dynamic execution fallback bypasses static ESM module validation issues
+    const { PDFDocument, rgb } = require('pdf-lib');
     const pdfDoc = await PDFDocument.create();
     const page = pdfDoc.addPage([600, 800]);
     
@@ -164,11 +159,6 @@ app.get('/api/reports/pdf', authenticateToken, async (req, res) => {
   }
 });
 
-// Explicit try/catch around the listener to trap network interface errors
-try {
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Core Secure Matrix Stack listening safely on port ${PORT}`);
-  });
-} catch (bootError) {
-  console.error("💥 FAILED TO BIND TO PORT WORKSPACE:", bootError.message);
-}
+app.listen(PORT, () => {
+  console.log(`🚀 Core Secure Matrix Stack listening safely on port ${PORT}`);
+});
