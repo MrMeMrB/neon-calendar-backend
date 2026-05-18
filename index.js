@@ -1,16 +1,17 @@
-const express = require('express');
-const cors = require('cors');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const cron = require('node-cron');
-const axios = require('axios');
-const { PDFDocument, rgb } = require('pdf-lib'); // For your incident/log report downloads
+import express from 'express';
+import cors from 'cors';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import cron from 'node-cron';
+import axios from 'axios';
+import { PDFDocument, rgb } from 'pdf-lib';
 
+// The rest of your code remains completely identical!
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = 5001;
+const PORT = process.env.PORT || 5001; // Render will inject this dynamically
 const JWT_SECRET = "matrix_override_secure_token_99812";
 
 // --- DATABASE SIMULATION LAYER (Connects straight to your Mongo/Postgres instances) ---
