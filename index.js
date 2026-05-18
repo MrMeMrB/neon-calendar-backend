@@ -20,7 +20,6 @@ const pool = new Pool({
 let memoryCache = { zoe: [], work: [], family: [] };
 
 const initDb = async () => {
-  // Enhanced schema to support behavioural tracking parameters
   await pool.query(`
     CREATE TABLE IF NOT EXISTS events (
       id SERIAL PRIMARY KEY,
@@ -44,7 +43,7 @@ const initDb = async () => {
     );
   `);
 
-  console.log("PostgreSQL Relational Metrics Schema Operational.");
+  console.log("PostgreSQL Database Architecture Operational.");
 };
 initDb().catch(console.error);
 
@@ -65,8 +64,6 @@ const fetchExternalCalendar = async (url, domainName, defaultColor) => {
     return Object.values(data)
       .filter(event => {
         if (event.type !== 'VEVENT' || !event.start) return false;
-        
-        // Hide elements routed or purged by user choice
         if (stateMap.get(event.uid) === 'blocked') return false; 
 
         const eventStart = new Date(event.start);
@@ -75,7 +72,6 @@ const fetchExternalCalendar = async (url, domainName, defaultColor) => {
       .map(event => {
         let title = event.summary || "Untitled Event";
         
-        // Process Outlook-specific tentative statuses without skipping them
         const isTentative = event['X-MICROSOFT-CDO-BUSYSTATUS'] === 'TENTATIVE' || 
                             String(event.description).includes('Tentative');
         if (isTentative && domainName === 'work') {
@@ -90,29 +86,28 @@ const fetchExternalCalendar = async (url, domainName, defaultColor) => {
           description: event.description || '',
           color: defaultColor,
           calendar: domainName,
-          isUnverified: false,
           isExternal: true
         };
       });
   } catch (err) {
-    console.error(`iCal extraction dropped for ${domainName}:`, err.message);
+    console.error(`iCal Parser drop for ${domainName}:`, err.message);
     return [];
   }
 };
 
 const updateAllCalendarsCache = async () => {
   try {
-    // Zoe and Work feeds now pass through 100% cleanly without structural restrictions
     if (process.env.ICAL_URL_ZOE) memoryCache.zoe = await fetchExternalCalendar(process.env.ICAL_URL_ZOE, 'zoe', '#f43f5e');
     if (process.env.ICAL_URL_WORK) memoryCache.work = await fetchExternalCalendar(process.env.ICAL_URL_WORK, 'work', '#818cf8');
     if (process.env.ICAL_URL_FAMILY) memoryCache.family = await fetchExternalCalendar(process.env.ICAL_URL_FAMILY, 'family', '#f59e0b');
-    console.log("Operational external streams cached.");
-  } catch (err) { console.error("Cache iteration error:", err); }
+    console.log("External memory cache segments updated.");
+  } catch (err) { console.error("Cache sync failed:", err); }
 };
 
 updateAllCalendarsCache();
 setInterval(updateAllCalendarsCache, 5 * 60 * 1000);
 
+// FIX: Rigid context distribution logic applied here
 app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
@@ -135,25 +130,33 @@ app.get('/api/events', async (req, res) => {
              row.calendar === 'work' ? '#818cf8' : 
              row.calendar === 'liam-life' ? '#00f0ff' : 
              row.calendar === 'kids-logs' ? '#ec4899' : '#10b981',
-      // Deliver logged structural values back to UI layout
       metricSentiment: row.metric_sentiment,
       metricLocation: row.metric_location,
       metricSeverity: row.metric_severity
     }));
 
-    const allExternal = [
-      ...memoryCache.zoe,
-      ...memoryCache.work,
-      ...memoryCache.family
-    ];
-
+    // 1. COMBINED: Show everything together
     if (targetView === 'combined') {
-      return res.json([...localEvents, ...allExternal]);
+      return res.json([
+        ...localEvents,
+        ...memoryCache.zoe,
+        ...memoryCache.work,
+        ...memoryCache.family
+      ]);
     }
 
-    // Isolate structural stream distributions directly
-    const filteredExternal = allExternal.filter(e => e.calendar === targetView);
-    return res.json([...localEvents, ...filteredExternal]);
+    // 2. ZOE CALENDAR: Only DB items tagged 'zoe' + raw Google Calendar feed
+    if (targetView === 'zoe') {
+      return res.json([...localEvents, ...memoryCache.zoe]);
+    }
+
+    // 3. WORK CALENDAR: Only DB items tagged 'work' + Outlook feed (including Tentatives)
+    if (targetView === 'work') {
+      return res.json([...localEvents, ...memoryCache.work]);
+    }
+
+    // 4. LIAM'S LIFE & KIDS LOGS: Strictly local DB events only, no external feed data mixed in
+    return res.json(localEvents);
 
   } catch (err) { 
     res.status(500).json({ error: err.message }); 
@@ -206,4 +209,4 @@ app.post('/api/events', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => console.log(`Routing Engine running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Routing Server operational on port ${PORT}`));
