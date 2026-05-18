@@ -133,7 +133,7 @@ const updateAllCalendarsCache = async () => {
 updateAllCalendarsCache();
 setInterval(updateAllCalendarsCache, 5 * 60 * 1000);
 
-// FIX: LINK LIVE STREAMS TO COMPONENT FILTERS
+// FIX: EXPLICITLY SYNC WITH FRONTEND SIDEBAR IDS
 app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
@@ -158,7 +158,6 @@ app.get('/api/events', async (req, res) => {
              row.calendar === 'kids-logs' ? '#ec4899' : '#10b981'
     }));
 
-    // FIXED MERGE LOGIC: Combines local entries with live live-stream arrays on isolated matches
     if (targetView === 'combined') {
       return res.json([
         ...localEvents,
@@ -183,6 +182,11 @@ app.get('/api/events', async (req, res) => {
 
     if (targetView === 'liam') {
       return res.json([...localEvents, ...memoryCache.liam]);
+    }
+
+    if (targetView === 'kids-logs') {
+      // Correctly serves localized logs array back safely
+      return res.json(localEvents);
     }
 
     res.json(localEvents);
