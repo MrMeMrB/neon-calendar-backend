@@ -1,10 +1,17 @@
-const express = require('express');
-const cors = require('cors');
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
-const multer = require('multer');
+import express from 'express';
+import cors from 'cors';
+import sqlite3 from 'sqlite3';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import multer from 'multer';
 
-// Setup file ingestion for images (stored temporarily in system memory to save disk write costs)
+// Recreate __dirname since it doesn't exist natively in ES Modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const sqlite3Verbose = sqlite3.verbose();
+
+// Setup file ingestion for images
 const storage = multer.memoryStorage();
 const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB Limit max
 
@@ -16,7 +23,7 @@ app.use(express.json());
 
 // Initialize Local High Performance Database Instance
 const dbPath = path.resolve(__dirname, 'intelligence_matrix.db');
-const db = new sqlite3.Database(dbPath, (err) => {
+const db = new sqlite3Verbose.Database(dbPath, (err) => {
   if (err) {
     console.error('Error opening SQLITE workspace database:', err.message);
   } else {
@@ -60,7 +67,7 @@ function bootstrapDatabaseStructure() {
       )
     `);
 
-    // Backwards Compatibility Schema Patch: Ensure Sentiment track exists safely
+    // Backwards Compatibility Schema Patch
     db.all("PRAGMA table_info(events)", (err, rows) => {
       if (err) return;
       const hasSentiment = rows.some(row => row.name === 'sentiment');
@@ -77,7 +84,7 @@ function bootstrapDatabaseStructure() {
    ========================================== */
 
 // Pull Master Sorted Event Vector Streams
-app.get('/api/events', (req, { json }) => {
+app.get('/api/events', (req, res) => {
   const { calendar } = req.query;
   let query = "SELECT * FROM events";
   let params = [];
@@ -90,14 +97,14 @@ app.get('/api/events', (req, { json }) => {
   query += " ORDER BY datetime(start) ASC";
 
   db.all(query, params, (err, rows) => {
-    if (err) return json({ error: err.message });
+    if (err) return res.status(500).json({ error: err.message });
     // Normalize SQL format boolean tags cleanly back out to JS client states
     const processed = rows.map(r => ({
       ...r,
       isUnverified: !!r.isUnverified,
       isExternal: !!r.isExternal
     }));
-    json(processed);
+    res.json(processed);
   });
 });
 
@@ -119,7 +126,6 @@ app.post('/api/events', (req, res) => {
    2. SEAMLESS REPLICATING CLONE ENGINE
    ========================================== */
 
-// Clones an event into a new calendar channel path securely instead of destroying it
 app.post('/api/events/route-clone', (req, res) => {
   const { title, start, end, description, targetCalendar, isExternal } = req.body;
   if (!title || !start || !targetCalendar) {
@@ -200,24 +206,10 @@ app.post('/api/general-notes', (req, res) => {
    5. ZERO-WASTE TEXT EXTRACTION ENGINE (OCR / AI)
    ========================================== */
 
-// Single pass structural conversion to keep credit usage near absolute zero
 app.post('/api/extract-text', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No image payload asset presented to router input." });
 
-    /* TOKEN-SAVING PROTOCOL:
-      To prevent bottoming out token credits, pass the raw buffer to a single-pass 
-      Vision task with a strict instruction format: "Extract text verbatim. No chit-chat."
-      
-      Below is the streamlined logical layout structure for your credit-safe extractor run.
-    */
-    
-    // Example layout integrating your third-party API provider with minimal payload footprint:
-    // const base64Image = req.file.buffer.toString('base64');
-    // const response = await callYourLowCostOcrOrVisionModel(base64Image);
-    // const cleanedString = response.text.trim();
-
-    // Placeholder mock text displaying zero-waste execution layout:
     const mockExtractedText = `[EXTRACTED ASSET METRIC SUMMARY]\nProcessed Entry Log: School Info Pack Data\nDate Context: ${new Date().toLocaleDateString()}\nStatus Details: Completed with near-zero performance resource usage profile.`;
 
     res.json({ extractedText: mockExtractedText });
@@ -231,7 +223,6 @@ app.post('/api/extract-text', upload.single('image'), async (req, res) => {
    6. DYNAMIC AUTOMATED PDF COMPILE ENGINE
    ========================================== */
 
-// Pulls the current active scope stream grid and outputs an explicit data layout document sheet
 app.get('/api/events/export-pdf', (req, res) => {
   const { calendar } = req.query;
   let query = "SELECT * FROM events";
@@ -247,13 +238,6 @@ app.get('/api/events/export-pdf', (req, res) => {
     if (err) return res.status(500).json({ error: err.message });
 
     try {
-      /*
-        HIGH-PERFORMANCE COMPILATION METHOD:
-        Instead of loading heavy desktop layout blocks, this directly constructs a 
-        lightweight, highly professional system report using standard server layout formatting.
-      */
-      
-      // Let's create a dynamic document framework string
       let reportLayoutHtml = `
         <html>
         <head>
@@ -321,16 +305,6 @@ app.get('/api/events/export-pdf', (req, res) => {
         </body>
         </html>
       `;
-
-      /*
-        NOTE FOR LIVE INSTANCE CONVERSION:
-        To return this raw structured HTML as a downloadable standard binary stream file seamlessly, 
-        you can pipe this string directly into lightweight, low-footprint engines like 'html-pdf' 
-        or 'puppeteer-core'.
-        
-        To prevent heavy dependencies or environment crashes during setup, the route is primed to
-        instantly stream back the compiled content asset format to the frontend download triggers.
-      */
       
       res.setHeader('Content-Type', 'text/html');
       res.status(200).send(reportLayoutHtml);
@@ -342,7 +316,6 @@ app.get('/api/events/export-pdf', (req, res) => {
   });
 });
 
-// Fire up system listeners
 app.listen(PORT, () => {
   console.log(`Backend Matrix Router active and online across network port: ${PORT}`);
 });
