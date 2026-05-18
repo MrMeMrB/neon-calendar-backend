@@ -145,20 +145,25 @@ const syncSchoolFeed = async () => {
   try {
     const schoolUrl = "https://calendar.google.com/calendar/ical/c_ca05bb6f1b85733a8038889ae52245021dcf5f1253116eb7c88dd45745fa5965%40group.calendar.google.com/public/basic.ics";
     const data = await ical.async.fromURL(schoolUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    
     const now = new Date();
-    const startWindow = new Date(now.getFullYear(), now.getMonth() - 2, 1);
-    const endWindow = new Date(now.getFullYear(), now.getMonth() + 4, 0);
+    // CHANGED: Widened the cache window to catch 6 months ago up to 12 months in the future
+    const startWindow = new Date(now.getFullYear(), now.getMonth() - 6, 1);
+    const endWindow = new Date(now.getFullYear(), now.getMonth() + 12, 0);
 
     SCHOOL_CACHE = Object.values(data)
       .filter(e => e.type === 'VEVENT' && e.start)
-      .filter(e => { const s = new Date(e.start); return s >= startWindow && s <= endWindow; })
+      .filter(e => { 
+        const s = new Date(e.start); 
+        return s >= startWindow && s <= endWindow; 
+      })
       .map(e => ({
         id: e.uid || Math.random().toString(36).substr(2, 9),
         title: e.summary || 'School Event',
         start: new Date(e.start).toISOString(),
         end: e.end ? new Date(e.end).toISOString() : null,
         description: e.description || '',
-        calendar: 'school', // Explicit clean match for frontend filtering
+        calendar: 'school', 
         color: '#0284c7',
         isExternal: true,
         originCalendar: 'school'
