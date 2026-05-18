@@ -147,7 +147,6 @@ const syncSchoolFeed = async () => {
     const data = await ical.async.fromURL(schoolUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     
     const now = new Date();
-    // Catch 6 months back and 12 months forward to make sure all school terms show up
     const startWindow = new Date(now.getFullYear(), now.getMonth() - 6, 1);
     const endWindow = new Date(now.getFullYear(), now.getMonth() + 12, 0);
 
@@ -198,11 +197,10 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// CALENDAR SYSTEM MATRIX DISPATCHER - FIXED EXPLICIT OVERRIDES
+// CALENDAR SYSTEM MATRIX DISPATCHER
 app.get('/api/events', authenticateToken, async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
-    // 1. Pull EVERY database custom manual layout entry
     const dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
     
     const localEvents = dbResult.rows.map(row => ({
@@ -213,40 +211,39 @@ app.get('/api/events', authenticateToken, async (req, res) => {
       description: row.description || '', 
       calendar: row.calendar || 'combined', 
       isExternal: false,
-      color: row.calendar === 'zoe' ? '#f43f5e' : row.calendar === 'work' ? '#818cf8' : row.calendar === 'school' ? '#0284c7' : row.calendar === 'liam-life' ? '#00f0ff' : row.calendar === 'kids-logs' ? '#ec4899' : '#10b981',
+      color: row.calendar === 'zoe' ? '#f43f5e' : row.calendar === 'work' ? '#818cf8' : row.calendar === 'school' ? '#0284c7' : row.calendar === 'liam-life' ? '#f59e0b' : row.calendar === 'kids-logs' ? '#ec4899' : '#10b981',
       metricSentiment: row.metric_sentiment, 
       metricLocation: row.metric_location, 
       metricSeverity: row.metric_severity
     }));
 
-    // 2. EXPLICIT ROUTE INTERCEPTORS (Guarantees data pops on separate tabs)
     if (targetView === 'school') {
       const manualSchool = localEvents.filter(e => e.calendar === 'school');
-      const totalSchool = [...manualSchool, ...SCHOOL_CACHE].sort((a, b) => new Date(a.start) - new Date(b.start));
-      return res.json(totalSchool);
+      return res.json([...manualSchool, ...SCHOOL_CACHE].sort((a, b) => new Date(a.start) - new Date(b.start)));
     }
 
     if (targetView === 'zoe') {
       const manualZoe = localEvents.filter(e => e.calendar === 'zoe');
-      const totalZoe = [...manualZoe, ...ZOE_CACHE].sort((a, b) => new Date(a.start) - new Date(b.start));
-      return res.json(totalZoe);
+      return res.json([...manualZoe, ...ZOE_CACHE].sort((a, b) => new Date(a.start) - new Date(b.start)));
     }
 
     if (targetView === 'work') {
       const manualWork = localEvents.filter(e => e.calendar === 'work');
-      const totalWork = [...manualWork, ...WORK_CACHE].sort((a, b) => new Date(a.start) - new Date(b.start));
-      return res.json(totalWork);
+      return res.json([...manualWork, ...WORK_CACHE].sort((a, b) => new Date(a.start) - new Date(b.start)));
     }
 
-    // 3. MASTER COMBINED VIEW - Merges everything together
+    if (targetView === 'liam-life') {
+      const liamLifeEvents = localEvents.filter(e => e.calendar === 'liam-life');
+      return res.json(liamLifeEvents.sort((a, b) => new Date(a.start) - new Date(b.start)));
+    }
+
+    // MASTER COMBINED VIEW - Delivers everything cleanly to Frontend Tab Splitter
     const masterPool = [...localEvents, ...ZOE_CACHE, ...WORK_CACHE, ...SCHOOL_CACHE];
 
     if (targetView === 'combined') {
-      const sortedCombined = masterPool.sort((a, b) => new Date(a.start) - new Date(b.start));
-      return res.json(sortedCombined);
+      return res.json(masterPool.sort((a, b) => new Date(a.start) - new Date(b.start)));
     }
 
-    // Fallback filter logic for non-cache tabs like internal kids logs
     const dynamicSlice = masterPool
       .filter(event => String(event.calendar).toLowerCase() === String(targetView).toLowerCase())
       .sort((a, b) => new Date(a.start) - new Date(b.start));
@@ -268,19 +265,44 @@ app.post('/api/events', authenticateToken, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// OVERHAULED INTEGRATED ROUTER: Handles both Adding and Removing 
 app.post('/api/events/route', authenticateToken, async (req, res) => {
   const { eventId, title, start, end, description, targetCalendar, isExternal } = req.body;
   try {
-    await pool.query('INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5)', [title, start, end || null, description, targetCalendar]);
-    if (isExternal) await pool.query('INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status', [eventId, 'blocked']);
+    // Inserts cloned event explicitly assigned to Liam's Life
+    await pool.query(
+      'INSERT INTO events (title, start_time, end_time, description, calendar) VALUES ($1, $2, $3, $4, $5)', 
+      [title, start, end || null, description, targetCalendar]
+    );
+    
+    // If it was sourced from an external iCal stream (Work/Zoe), block the original item from cluttering the ecosystem
+    if (isExternal && eventId) {
+      await pool.query(
+        'INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status', 
+        [eventId, 'blocked']
+      );
+    }
+    
     await runAllSyncs();
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// FIXED LEARNING/CLEANUP AGENT: Drops records when dropped from Liam's Life
 app.post('/api/events/learn', authenticateToken, async (req, res) => {
+  const { eventId, status } = req.body;
   try {
-    await pool.query('INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status', [req.body.eventId, req.body.status]);
+    // 1. Log structural learning block
+    await pool.query(
+      'INSERT INTO event_learning_states (event_id, status) VALUES ($1, $2) ON CONFLICT (event_id) DO UPDATE SET status = EXCLUDED.status', 
+      [eventId, status]
+    );
+    
+    // 2. ABSOLUTELY ESSENTIAL: Remove the clone from the events collection table
+    if (status === 'blocked') {
+      await pool.query('DELETE FROM events WHERE id = $1', [eventId]);
+    }
+    
     await runAllSyncs();
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
