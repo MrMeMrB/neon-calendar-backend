@@ -110,7 +110,7 @@ const syncZoeFeed = async () => {
       .map(e => ({
         id: e.uid, title: e.summary || "Zoe Event",
         start: new Date(e.start).toISOString(), end: e.end ? new Date(e.end).toISOString() : null,
-        description: e.description || '', color: '#f43f5e', calendar: 'zoe', isExternal: true
+        description: e.description || '', color: '#f43f5e', calendar: 'zoe', isExternal: true, originCalendar: 'zoe'
       }));
     console.log(`Zoe Feed Cached: ${ZOE_CACHE.length} items.`);
   } catch (err) { console.error("Zoe iCal Sync Failure:", err.message); }
@@ -134,7 +134,7 @@ const syncWorkFeed = async () => {
         if (e['X-MICROSOFT-CDO-BUSYSTATUS'] === 'TENTATIVE' || String(e.description).includes('Tentative')) title = `⏳ [Tentative] ${title}`;
         return {
           id: e.uid, title, start: new Date(e.start).toISOString(), end: e.end ? new Date(e.end).toISOString() : null,
-          description: e.description || '', color: '#818cf8', calendar: 'work', isExternal: true
+          description: e.description || '', color: '#818cf8', calendar: 'work', isExternal: true, originCalendar: 'work'
         };
       });
     console.log(`Work Feed Cached: ${WORK_CACHE.length} items.`);
@@ -191,6 +191,7 @@ app.get('/api/events', authenticateToken, async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
     let dbResult;
+    // Query filtering layer optimization
     if (targetView === 'combined') {
       dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
     } else {
@@ -205,22 +206,18 @@ app.get('/api/events', authenticateToken, async (req, res) => {
       metricSentiment: row.metric_sentiment, metricLocation: row.metric_location, metricSeverity: row.metric_severity
     }));
 
-    // FIXED ISOLATION ROUTING
+    // CRITICAL FIX: EXPLICIT ISOLATION STREAM ROUTING BYPASSED TO RE-AGGREGATE DYNAMIC FEEDS ACCURATELY
     if (targetView === 'combined') {
       return res.json([...localEvents, ...ZOE_CACHE, ...WORK_CACHE]);
     }
     if (targetView === 'zoe') {
-      // Return ONLY local database entries saved explicitly to 'zoe' plus the live sync iCal cache
-      const zoeLocalOnly = localEvents.filter(e => e.calendar === 'zoe');
-      return res.json([...zoeLocalOnly, ...ZOE_CACHE]);
+      return res.json([...localEvents, ...ZOE_CACHE]);
     }
     if (targetView === 'work') {
-      // Return ONLY local database entries saved explicitly to 'work' plus the live sync iCal cache
-      const workLocalOnly = localEvents.filter(e => e.calendar === 'work');
-      return res.json([...workLocalOnly, ...WORK_CACHE]);
+      return res.json([...localEvents, ...WORK_CACHE]);
     }
     
-    // For 'kids-logs' or 'liam-life' views, return exactly what the database isolated
+    // For standalone database views ('kids-logs', 'liam-life'), return only the matching database array
     return res.json(localEvents);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
