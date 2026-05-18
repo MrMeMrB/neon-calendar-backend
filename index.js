@@ -6,13 +6,13 @@ import cron from 'node-cron';
 import axios from 'axios';
 import { PDFDocument, rgb } from 'pdf-lib';
 
-// The rest of your code remains completely identical!
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 5001; // Render will inject this dynamically
+const PORT = process.env.PORT || 5001; 
 const JWT_SECRET = "matrix_override_secure_token_99812";
+// ... the rest of your database arrays and logic follow here perfectly
 
 // --- DATABASE SIMULATION LAYER (Connects straight to your Mongo/Postgres instances) ---
 let usersDb = [];
