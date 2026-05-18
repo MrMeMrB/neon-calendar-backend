@@ -112,7 +112,7 @@ const fetchExternalCalendar = async (url, defaultColor, applyZoeKidsFilter = fal
           description: event.description || '',
           color: color,
           isUnverified: isUnverified,
-          isExternal: true // Flag to know if it originates from an live feed
+          isExternal: true
         };
       });
   } catch (err) {
@@ -137,6 +137,7 @@ setInterval(updateAllCalendarsCache, 5 * 60 * 1000);
 app.get('/api/events', async (req, res) => {
   const targetView = req.query.calendar || 'combined';
   try {
+    // 1. Pull database items filtered strictly by the current view
     let dbResult;
     if (targetView === 'combined') {
       dbResult = await pool.query('SELECT * FROM events ORDER BY start_time ASC');
@@ -152,30 +153,51 @@ app.get('/api/events', async (req, res) => {
       description: row.description,
       calendar: row.calendar,
       isExternal: false,
-      color: row.calendar === 'zoe' ? '#f43f5e' : row.calendar === 'work' ? '#818cf8' : row.calendar === 'family' ? '#f59e0b' : row.calendar === 'kids-logs' ? '#ec4899' : '#10b981'
+      color: row.calendar === 'zoe' ? '#f43f5e' : 
+             row.calendar === 'work' ? '#818cf8' : 
+             row.calendar === 'family' ? '#f59e0b' : 
+             row.calendar === 'kids-logs' ? '#ec4899' : '#10b981'
     }));
 
-    let finalPayload = [...localEvents];
-    
-    // Strict separation alignment logic: Only mix feeds into exact destinations
+    // 2. STRICT SEPARATION POINT: Only attach live streams if they match the active tab
     if (targetView === 'combined') {
-      finalPayload = [...finalPayload, ...memoryCache.liam, ...memoryCache.zoe, ...memoryCache.work, ...memoryCache.family];
-    } else if (targetView === 'liam') {
-      finalPayload = [...finalPayload, ...memoryCache.liam];
-    } else if (targetView === 'zoe') {
-      // Everything from Zoe's raw feed lives exclusively here unless sorted out
-      finalPayload = [...finalPayload, ...memoryCache.zoe];
-    } else if (targetView === 'work') {
-      finalPayload = [...finalPayload, ...memoryCache.work];
-    } else if (targetView === 'family') {
-      finalPayload = [...finalPayload, ...memoryCache.family];
+      const finalPayload = [
+        ...localEvents,
+        ...memoryCache.liam,
+        ...memoryCache.zoe,
+        ...memoryCache.work,
+        ...memoryCache.family
+      ];
+      return res.json(finalPayload);
     }
 
-    res.json(finalPayload);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    if (targetView === 'zoe') {
+      return res.json([...localEvents, ...memoryCache.zoe]);
+    }
+
+    if (targetView === 'family') {
+      return res.json([...localEvents, ...memoryCache.family]);
+    }
+
+    if (targetView === 'liam') {
+      return res.json([...localEvents, ...memoryCache.liam]);
+    }
+
+    if (targetView === 'work') {
+      return res.json([...localEvents, ...memoryCache.work]);
+    }
+
+    if (targetView === 'kids-logs') {
+      return res.json(localEvents);
+    }
+
+    res.json(localEvents);
+  } catch (err) { 
+    res.status(500).json({ error: err.message }); 
+  }
 });
 
-// ROUTING MANEUVER: Transfers an event to another bucket
+// ROUTING MANEUVER: Transfers an event to another bucket locally
 app.post('/api/events/route', async (req, res) => {
   const { eventId, title, start, end, description, targetCalendar, isExternal } = req.body;
   try {
