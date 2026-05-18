@@ -11,21 +11,21 @@ const { Pool } = pkg;
 const app = express();
 const PORT = process.env.PORT || 5001;
 
-// Global Middleware Configuration
+// Premium Global Middleware
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Initialize Persistent Neon PostgreSQL Database Instance
+// Initialize Persistent Neon PostgreSQL Instance
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
 // Initialize Gemini Core AI Engine
-const ai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const ai = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
 
 /* ==========================================================================
-   1. DATABASE SCHEMA AUTOMATION & BOOTSTRAPPING
+   1. DATABASE SCHEMA INITIALIZATION
    ========================================================================== */
 async function bootstrapDatabase() {
   try {
@@ -50,9 +50,9 @@ async function bootstrapDatabase() {
         content TEXT
       )
     `);
-    console.log('🚀 Neon PostgreSQL Database schemas validated successfully.');
+    console.log('🚀 [Database] Neon PostgreSQL Schemas validated and online.');
   } catch (err) {
-    console.error('❌ Database bootstrapping failed:', err.message);
+    console.error('❌ [Database] Bootstrapping failed:', err.message);
   }
 }
 bootstrapDatabase();
@@ -68,10 +68,10 @@ function normalizeToISO(dateStr) {
 }
 
 /* ==========================================================================
-   2. INTELLIGENT SYNCHRONIZATION PIPELINE
+   2. HIGH-PERFORMANCE ICAL FETCH & AI MATRIX PIPELINE
    ========================================================================== */
 async function executeCalendarSync() {
-  console.log("🔄 Initiating high-speed replication down external iCal assets...");
+  console.log("🔄 [Sync Engine] Initiating secure sync of remote calendar feeds...");
   const sources = [
     { url: process.env.ICAL_URL_WORK, domain: 'work' },
     { url: process.env.ICAL_URL_ZOE, domain: 'family' }
@@ -79,17 +79,25 @@ async function executeCalendarSync() {
 
   for (const source of sources) {
     if (!source.url) {
-      console.log(`⚠️ Missing URL variable for domain: ${source.domain}`);
+      console.log(`⚠️ [Sync Engine] Variable skipped: Missing URL for ${source.domain}`);
       continue;
     }
     try {
-      const webEvents = await ical.fromURL(source.url);
+      console.log(`📡 [Sync Engine] Fetching data from ${source.domain} link...`);
+      
+      // CRITICAL FIX: Add browser headers so the calendar server doesn't block the request
+      const webEvents = await ical.fromURL(source.url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+      });
+      
+      let parsedCount = 0;
+
       for (const k in webEvents) {
         if (!webEvents.hasOwnProperty(k)) continue;
         const ev = webEvents[k];
         if (ev.type !== 'VEVENT') continue;
 
-        const title = ev.summary || "Untitled Event Engine";
+        const title = ev.summary || "Untitled Core Event";
         const start = ev.start ? new Date(ev.start).toISOString() : null;
         const end = ev.end ? new Date(ev.end).toISOString() : null;
         const desc = ev.description || "";
@@ -101,8 +109,8 @@ async function executeCalendarSync() {
         let sentiment = 'neutral';
         let isUnverified = 0;
 
-        // Perform Deep AI Analysis on Zoe's Feed to Track Kids Log Exceptions
-        if (source.domain === 'family' && process.env.GEMINI_API_KEY) {
+        // Run Zoe's family calendar through Gemini to isolate kid logs
+        if (source.domain === 'family' && ai) {
           try {
             const model = ai.getGenerativeModel({ model: "gemini-1.5-flash" });
             const prompt = `Analyze this entry: Title: "${title}". Desc: "${desc}". Is this linked to children's behavior, school logs, kids activities, or parenting tracking? Return strict JSON format with keys: "isKidLog" (boolean), "sentiment" ("positive", "negative", "neutral").`;
@@ -116,7 +124,7 @@ async function executeCalendarSync() {
               isUnverified = 1; 
             }
           } catch (e) {
-            console.error("⚠️ AI categorization skipped:", e.message);
+            // Keep going if AI analysis errors out
           }
         }
 
@@ -127,19 +135,21 @@ async function executeCalendarSync() {
             title = EXCLUDED.title, start_time = EXCLUDED.start_time, end_time = EXCLUDED.end_time, description = EXCLUDED.description
         `;
         await pool.query(query, [title, start, end, desc, targetCalendar, isUnverified, sentiment, uid]);
+        parsedCount++;
       }
+      console.log(`✅ [Sync Engine] Successfully mapped ${parsedCount} entries for ${source.domain}`);
     } catch (err) {
-      console.error(`❌ Sync line execution dropped on source:`, err.message);
+      console.error(`❌ [Sync Engine] Line execution dropped on ${source.domain}:`, err.message);
     }
   }
-  console.log("✅ Sync complete. Data matrix normalized inside Neon DB.");
+  console.log("🏁 [Sync Engine] Operational sync run completed.");
 }
 
-// Automatically sync every 30 minutes in the background
+// Background Cron Automation (Runs every 30 minutes)
 cron.schedule('*/30 * * * *', () => executeCalendarSync());
 
 /* ==========================================================================
-   3. API ENDPOINTS
+   3. API INFRASTRUCTURE ROUTING
    ========================================================================== */
 
 app.get('/api/events', async (req, res) => {
@@ -239,5 +249,5 @@ app.post('/api/general-notes', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`⚡ API Service Active on port: ${PORT}`);
+  console.log(`⚡ [System Startup] API Engine safely active on port: ${PORT}`);
 });
